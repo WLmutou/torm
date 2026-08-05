@@ -1,4 +1,3 @@
-use crate::db::error::{Result, TormError};
 use crate::db::db_types::SqlValue;
 use crate::orm::query::{OrderDirection, WhereCondition};
 use std::collections::HashMap;
@@ -313,11 +312,11 @@ impl AdvancedQuery {
         self
     }
 
-    pub fn order_by_asc(mut self, column: &str) -> Self {
+    pub fn order_by_asc(self, column: &str) -> Self {
         self.order_by(column, OrderDirection::Asc)
     }
 
-    pub fn order_by_desc(mut self, column: &str) -> Self {
+    pub fn order_by_desc(self, column: &str) -> Self {
         self.order_by(column, OrderDirection::Desc)
     }
 

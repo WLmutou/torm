@@ -314,7 +314,6 @@ impl StorageEngine {
             (SqlValue::DateTime(_), ColumnType::DateTime) => true,
             // 允许一些隐式转换
             (SqlValue::I8(_) | SqlValue::I16(_) | SqlValue::I32(_), ColumnType::BigInt) => true,
-            (SqlValue::F32(_), ColumnType::Real) => true,
             _ => false,
         }
     }

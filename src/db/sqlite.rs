@@ -150,11 +150,31 @@ impl DatabaseConnection for SqliteConnection {
             .map(|v| v as &dyn rusqlite::ToSql)
             .collect();
 
-        let affected = conn
-            .execute(&sql, param_refs.as_slice())
-            .map_err(|e| DbError::execution_error(format!("Execute failed: {}", e)))?;
-
-        Ok(affected as u64)
+        // SELECT/WITH 语句用 query 执行（返回行数），其他语句用 execute（返回影响行数）
+        let trimmed = sql.trim_start();
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with("SELECT") || upper.starts_with("WITH") {
+            let mut stmt = conn
+                .prepare(trimmed)
+                .map_err(|e| DbError::query_error(format!("Failed to prepare statement: {}", e)))?;
+            let mut rows = stmt
+                .query(param_refs.as_slice())
+                .map_err(|e| DbError::query_error(format!("Query execution failed: {}", e)))?;
+            let mut count: u64 = 0;
+            while rows
+                .next()
+                .map_err(|e| DbError::query_error(format!("Row error: {}", e)))?
+                .is_some()
+            {
+                count += 1;
+            }
+            Ok(count)
+        } else {
+            let affected = conn
+                .execute(trimmed, param_refs.as_slice())
+                .map_err(|e| DbError::execution_error(format!("Execute failed: {}", e)))?;
+            Ok(affected as u64)
+        }
     }
 
     async fn begin_transaction(&self) -> Result<Transaction, DbError> {

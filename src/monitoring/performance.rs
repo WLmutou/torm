@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
-use serde::{Serialize, Deserialize};
 use crate::utils::simple_lru::SimpleLruCache;
 
 /// 查询缓存项
@@ -217,7 +215,7 @@ impl<T: Clone> BatchOperation<T> {
         self.operations.len() >= self.batch_size
     }
 
-    pub fn execute_in_batches<F, Fut>(&self, executor: F) -> impl Iterator<Item = Vec<BatchItem<T>>> + '_
+    pub fn execute_in_batches<F, Fut>(&self, _executor: F) -> impl Iterator<Item = Vec<BatchItem<T>>> + '_
     where
         F: Fn(Vec<BatchItem<T>>) -> Fut + Copy,
         Fut: std::future::Future<Output = ()>,
@@ -294,6 +292,7 @@ impl<T: Clone> Default for BatchOperation<T> {
 /// 预编译语句缓存（使用简化的 LRU）
 pub struct PreparedStatementCache {
     cache: Arc<Mutex<SimpleLruCache<String, String>>>,
+    #[allow(dead_code)]
     capacity: usize,
 }
 
@@ -558,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_cache_entry_expiration() {
-        let mut entry = CacheEntry::new("test_data", Some(Duration::from_millis(1)));
+        let entry = CacheEntry::new("test_data", Some(Duration::from_millis(1)));
         std::thread::sleep(Duration::from_millis(10));
         assert!(entry.is_expired());
     }

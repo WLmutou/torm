@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub struct SimplePool<T> {
     connections: Arc<Mutex<VecDeque<T>>>,
     max_size: usize,
+    #[allow(dead_code)]
     min_idle: usize,
     timeout: Duration,
     created_connections: Arc<Mutex<usize>>,

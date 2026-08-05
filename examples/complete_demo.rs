@@ -141,10 +141,10 @@ impl Model for User {
 
 async fn demonstrate_database_file_connection() -> Result<(), Box<dyn std::error::Error>> {
     println!("SQLite 连接:");
-    let dsn = Dsn::new(DBDriver::SQLite, "demo.db");
+    let dsn = Dsn::new(DBDriver::SQLite, "target/demo.db");
     println!("  DSN: {}", dsn.build());
     
-    let database = Database::sqlite("demo.db").await?;
+    let database = Database::sqlite("target/demo.db").await?;
     println!("  ✅ 连接成功");
     println!("  驱动: {:?}", database.db_type());
     

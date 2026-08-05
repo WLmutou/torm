@@ -1,4 +1,5 @@
 use crate::db::db_types::{SqlValue, QueryResult, DbType};
+use crate::orm::model::Model;
 use std::sync::Arc;
 
 /// 数据库连接 trait
@@ -315,6 +316,166 @@ impl Database {
     pub async fn close(&self) -> Result<(), DbError> {
         self.conn.close().await
     }
+
+    // ------------------------------------------------------------------
+    // GORM-style model persistence API
+    // ------------------------------------------------------------------
+
+    /// GORM-style create: INSERT the model, running the `before_create`/`after_create` hooks.
+    /// Builds the INSERT from `Model::columns()` plus `created_at`/`updated_at`
+    /// (set by the `before_create` hook; the table must include those columns).
+    pub async fn create_model<M: Model>(&self, model: &mut M) -> Result<(), DbError> {
+        model.before_create()?;
+
+        let mut columns: Vec<(&str, SqlValue)> = Vec::new();
+        if let Some(id) = model.id() {
+            columns.push((M::primary_key(), SqlValue::String(id)));
+        }
+        columns.extend(model.columns());
+        if let Some(ts) = model.created_at() {
+            columns.push(("created_at", SqlValue::DateTime(ts)));
+        }
+        if let Some(ts) = model.updated_at() {
+            columns.push(("updated_at", SqlValue::DateTime(ts)));
+        }
+        if columns.is_empty() {
+            return Err(DbError::execution_error(
+                "Model has no columns to insert (implement Model::columns)",
+            ));
+        }
+
+        let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+        let values: Vec<SqlValue> = columns.into_iter().map(|(_, value)| value).collect();
+        let placeholders = placeholders(self.db_type(), values.len());
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            M::table_name(),
+            names.join(", "),
+            placeholders.join(", ")
+        );
+
+        self.execute(&sql, &values).await?;
+        model.after_create()?;
+        Ok(())
+    }
+
+    /// GORM-style first: find one model by primary key.
+    pub async fn first_model<M: Model>(&self, id: &str) -> Result<Option<M>, DbError> {
+        M::before_find()?;
+        let sql = format!(
+            "SELECT * FROM {} WHERE {} = {} LIMIT 1",
+            M::table_name(),
+            M::primary_key(),
+            placeholder(self.db_type(), 1)
+        );
+        let result = self.query(&sql, &[SqlValue::String(id.to_string())]).await?;
+        match result.rows.first() {
+            Some(row) => {
+                let mut model = M::from_row(row).ok_or_else(|| {
+                    DbError::ParseError(format!(
+                        "Failed to build {} from query row",
+                        M::table_name()
+                    ))
+                })?;
+                model.after_find()?;
+                Ok(Some(model))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// GORM-style find: load all rows of the model's table.
+    pub async fn find_models<M: Model>(&self) -> Result<Vec<M>, DbError> {
+        M::before_find()?;
+        let sql = format!("SELECT * FROM {}", M::table_name());
+        let result = self.query(&sql, &[]).await?;
+        let mut models = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            let mut model = M::from_row(row).ok_or_else(|| {
+                DbError::ParseError(format!(
+                    "Failed to build {} from query row",
+                    M::table_name()
+                ))
+            })?;
+            model.after_find()?;
+            models.push(model);
+        }
+        Ok(models)
+    }
+
+    /// GORM-style update: UPDATE the given columns of the model, matched by primary key.
+    /// Runs the `before_update`/`after_update` hooks and refreshes `updated_at`.
+    pub async fn update_model<M: Model>(
+        &self,
+        model: &mut M,
+        updates: &[(&str, SqlValue)],
+    ) -> Result<u64, DbError> {
+        let id = model
+            .id()
+            .ok_or_else(|| DbError::execution_error("Model has no primary key value"))?;
+        model.before_update()?;
+
+        let mut sets: Vec<(&str, SqlValue)> = updates.to_vec();
+        if let Some(ts) = model.updated_at() {
+            sets.push(("updated_at", SqlValue::DateTime(ts)));
+        }
+        if sets.is_empty() {
+            return Ok(0);
+        }
+
+        let mut sql = format!("UPDATE {} SET ", M::table_name());
+        let mut values = Vec::with_capacity(sets.len() + 1);
+        for (i, (column, value)) in sets.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(column);
+            sql.push_str(" = ");
+            sql.push_str(&placeholder(self.db_type(), i + 1));
+            values.push(value.clone());
+        }
+        sql.push_str(&format!(
+            " WHERE {} = {}",
+            M::primary_key(),
+            placeholder(self.db_type(), sets.len() + 1)
+        ));
+        values.push(SqlValue::String(id));
+
+        let affected = self.execute(&sql, &values).await?;
+        model.after_update()?;
+        Ok(affected)
+    }
+
+    /// GORM-style delete: DELETE the model row matched by primary key.
+    /// Runs the `before_delete`/`after_delete` hooks.
+    pub async fn delete_model<M: Model>(&self, model: &mut M) -> Result<u64, DbError> {
+        let id = model
+            .id()
+            .ok_or_else(|| DbError::execution_error("Model has no primary key value"))?;
+        model.before_delete()?;
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = {}",
+            M::table_name(),
+            M::primary_key(),
+            placeholder(self.db_type(), 1)
+        );
+        let affected = self.execute(&sql, &[SqlValue::String(id)]).await?;
+        model.after_delete()?;
+        Ok(affected)
+    }
+}
+
+/// Parameter placeholder for one position (`$1` for PostgreSQL, `?` otherwise).
+fn placeholder(db_type: DbType, index: usize) -> String {
+    match db_type {
+        DbType::PostgreSQL => format!("${}", index),
+        _ => "?".to_string(),
+    }
+}
+
+/// Parameter placeholders for a statement with `count` parameters.
+fn placeholders(db_type: DbType, count: usize) -> Vec<String> {
+    (1..=count).map(|i| placeholder(db_type, i)).collect()
 }
 
 #[cfg(test)]
@@ -376,5 +537,129 @@ mod tests {
 
         let error = DbError::transaction_error("test");
         assert!(matches!(error, DbError::TransactionError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_model_crud_sqlite() {
+        use crate::db::db_types::Row;
+        use crate::orm::model::Timestamps;
+        use chrono::{DateTime, Utc};
+
+        #[derive(Debug, Clone)]
+        struct Pet {
+            id: String,
+            name: String,
+            age: i32,
+            timestamps: Timestamps,
+        }
+
+        impl Pet {
+            fn new(name: &str, age: i32) -> Self {
+                Self {
+                    id: format!("pet-{}", name),
+                    name: name.to_string(),
+                    age,
+                    timestamps: Timestamps::new(),
+                }
+            }
+        }
+
+        impl Model for Pet {
+            fn table_name() -> &'static str {
+                "pets"
+            }
+
+            fn id(&self) -> Option<String> {
+                Some(self.id.clone())
+            }
+
+            fn set_id(&mut self, id: String) {
+                self.id = id;
+            }
+
+            fn created_at(&self) -> Option<DateTime<Utc>> {
+                self.timestamps.created_at
+            }
+
+            fn updated_at(&self) -> Option<DateTime<Utc>> {
+                self.timestamps.updated_at
+            }
+
+            fn deleted_at(&self) -> Option<DateTime<Utc>> {
+                self.timestamps.deleted_at
+            }
+
+            fn set_created_at(&mut self, ts: DateTime<Utc>) {
+                self.timestamps.created_at = Some(ts);
+            }
+
+            fn set_updated_at(&mut self, ts: DateTime<Utc>) {
+                self.timestamps.updated_at = Some(ts);
+            }
+
+            fn set_deleted_at(&mut self, ts: Option<DateTime<Utc>>) {
+                self.timestamps.deleted_at = ts;
+            }
+
+            fn columns(&self) -> Vec<(&'static str, SqlValue)> {
+                vec![
+                    ("name", SqlValue::String(self.name.clone())),
+                    ("age", SqlValue::I32(self.age)),
+                ]
+            }
+
+            fn from_row(row: &Row) -> Option<Self> {
+                Some(Self {
+                    id: row.get("id")?.as_str()?.to_string(),
+                    name: row.get("name")?.as_str()?.to_string(),
+                    age: match row.get("age")? {
+                        SqlValue::I32(a) => *a,
+                        SqlValue::I64(a) => *a as i32,
+                        _ => return None,
+                    },
+                    timestamps: Timestamps::new(),
+                })
+            }
+        }
+
+        let db = Database::sqlite(":memory:").await.unwrap();
+        db.execute(
+            "CREATE TABLE pets (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                age INTEGER,
+                created_at TEXT,
+                updated_at TEXT
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+        // create — hooks set timestamps
+        let mut pet = Pet::new("Rex", 3);
+        db.create_model(&mut pet).await.unwrap();
+        assert!(pet.timestamps.created_at.is_some());
+
+        // first
+        let found: Option<Pet> = db.first_model(&pet.id).await.unwrap();
+        assert_eq!(found.unwrap().name, "Rex");
+
+        // find all
+        let mut pets: Vec<Pet> = db.find_models().await.unwrap();
+        assert_eq!(pets.len(), 1);
+
+        // update — hooks refresh updated_at
+        db.update_model(&mut pets[0], &[("age", SqlValue::I32(4))])
+            .await
+            .unwrap();
+        assert!(pets[0].timestamps.updated_at.is_some());
+        let updated: Pet = db.first_model(&pet.id).await.unwrap().unwrap();
+        assert_eq!(updated.age, 4);
+
+        // delete
+        db.delete_model(&mut pet).await.unwrap();
+        let gone: Option<Pet> = db.first_model(&pet.id).await.unwrap();
+        assert!(gone.is_none());
     }
 }

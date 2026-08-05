@@ -6,12 +6,14 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 
 - ✅ **Standard SQLite Support** - Built on rusqlite, generates standard SQLite file format (readable by sqlite3 and other SQLite tools)
 - ✅ **Pure Rust Storage Engine** - Built-in zero-dependency in-memory storage engine (StorageEngine)
-- ✅ **MySQL/PostgreSQL Framework** - Protocol framework support
+- ✅ **PostgreSQL Support** - Native wire protocol implementation (cleartext / MD5 / SCRAM-SHA-256 auth, parameterized queries)
+- ✅ **MySQL Framework** - Protocol framework support
 - ✅ **Async/await Support** - Fully based on the Tokio async runtime
 - ✅ **Multi-Database Support** - MySQL, PostgreSQL, SQLite
 - ✅ **Fluent Query Builder** - Clean and intuitive query API
 - ✅ **Advanced Queries** - JOIN, GROUP BY, HAVING, aggregate functions
 - ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
+- ✅ **GORM-style Model CRUD** - `create_model` / `first_model` / `find_models` / `update_model` / `delete_model` on `Database`
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
 - ✅ **Logging & Performance Monitoring** - Built-in logging system and performance stats
@@ -28,6 +30,10 @@ serde_json = "1.0"          # JSON support
 chrono = "0.4"              # Time handling
 async-trait = "0.1"         # Async traits
 thiserror = "1.0"           # Error derivation
+sha2 = "0.10"               # PostgreSQL SCRAM-SHA-256 authentication
+md-5 = "0.10"               # PostgreSQL MD5 authentication
+hex = "0.4"                 # Byte/hex encoding
+base64 = "0.22"             # SCRAM base64 encoding
 ```
 
 ### Database Layer Implementation
@@ -37,7 +43,7 @@ thiserror = "1.0"           # Error derivation
 | SQLite | rusqlite (standard file format) | ✅ Complete |
 | In-memory engine | Pure Rust StorageEngine | ✅ Complete |
 | MySQL | Custom protocol framework | ⚠️ Framework |
-| PostgreSQL | Custom protocol framework | ⚠️ Framework |
+| PostgreSQL | Custom wire protocol (native) | ✅ Complete |
 | Type safety | Custom SqlValue | ✅ Complete |
 | Transactions | Custom implementation | ✅ Complete |
 
@@ -54,7 +60,7 @@ src/
 │   ├── storage.rs      # Pure Rust in-memory storage engine
 │   ├── sqlite.rs       # SQLite implementation (rusqlite backend)
 │   ├── mysql.rs        # MySQL protocol framework
-│   ├── postgresql.rs   # PostgreSQL protocol framework
+│   ├── postgresql.rs   # PostgreSQL wire protocol implementation
 │   └── pool.rs         # Connection pools
 ├── orm/                # ORM layer
 │   ├── model.rs        # Model trait
@@ -182,11 +188,15 @@ let conn = pool.get_connection().await?;
 - Authentication protocol framework
 - **Status**: Needs completion, suitable for learning
 
-### ⚠️ PostgreSQL (Framework support)
-- TCP connection establishment
-- PostgreSQL StartupMessage
-- Message send/receive framework
-- **Status**: Needs completion, suitable for learning
+### ✅ PostgreSQL (Native wire protocol, production-ready)
+- Real TCP connection via `tokio::net::TcpStream`
+- Full startup handshake (StartupMessage, protocol 3.0)
+- Authentication: cleartext, MD5, SCRAM-SHA-256 (with server signature verification)
+- Simple query protocol (`Q`) for multi-statement SQL
+- Extended query protocol (Parse/Bind/Describe/Execute/Sync) for parameterized statements
+- Row decoding: bool, int2/4/8, float4/8, text/varchar, bytea, json/jsonb, date/timestamp/timestamptz, numeric
+- Transactions (BEGIN / COMMIT / ROLLBACK)
+- **Status**: Ready for production use with PostgreSQL 10+
 
 ## 🏃 Run Examples
 
@@ -219,7 +229,7 @@ cargo test
 ### Custom Implementations
 - **Pure Rust Storage Engine**: StorageEngine (zero-dependency in-memory database)
 - **MySQL Protocol**: MySqlConnection (framework)
-- **PostgreSQL Protocol**: PostgresConnection (framework)
+- **PostgreSQL Protocol**: PostgresConnection (native wire protocol)
 - **Type System**: SqlValue, Row, QueryResult
 - **Connection Abstraction**: DatabaseConnection trait
 - **Transaction System**: Transaction

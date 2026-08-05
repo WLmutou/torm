@@ -6,12 +6,14 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 
 - ✅ **标准 SQLite 支持** - 基于 rusqlite，生成标准 SQLite 文件格式（可被 sqlite3 等工具直接读取）
 - ✅ **纯 Rust 存储引擎** - 内置零依赖的内存存储引擎（StorageEngine）
-- ✅ **MySQL/PostgreSQL 框架** - 协议框架支持
+- ✅ **PostgreSQL 支持** - 原生协议实现（cleartext / MD5 / SCRAM-SHA-256 认证、参数化查询）
+- ✅ **MySQL 框架** - 协议框架支持
 - ✅ **异步/await 支持** - 完全基于 Tokio 异步运行时
 - ✅ **多数据库支持** - MySQL、PostgreSQL、SQLite
 - ✅ **流畅的查询构建器** - 提供简洁直观的查询 API
 - ✅ **高级查询** - JOIN、GROUP BY、HAVING、聚合函数
 - ✅ **模型 Trait** - 自动管理创建时间、更新时间等时间戳
+- ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create_model` / `first_model` / `find_models` / `update_model` / `delete_model`
 - ✅ **事务支持** - 支持事务的创建、提交和回滚
 - ✅ **连接池** - 支持 SQLite/MySQL/PostgreSQL 连接池
 - ✅ **日志与性能监控** - 内置日志系统和性能统计
@@ -37,7 +39,7 @@ thiserror = "1.0"           # 错误派生
 | SQLite | rusqlite（标准文件格式） | ✅ 完整 |
 | 内存存储引擎 | 纯 Rust StorageEngine | ✅ 完整 |
 | MySQL | 自定义协议框架 | ⚠️ 框架 |
-| PostgreSQL | 自定义协议框架 | ⚠️ 框架 |
+| PostgreSQL | 自定义协议（原生实现） | ✅ 完整 |
 | 类型安全 | 自定义 SqlValue | ✅ 完整 |
 | 事务支持 | 自定义实现 | ✅ 完整 |
 
@@ -54,7 +56,7 @@ src/
 │   ├── storage.rs      # 纯 Rust 内存存储引擎
 │   ├── sqlite.rs       # SQLite 实现（rusqlite 后端）
 │   ├── mysql.rs        # MySQL 协议框架
-│   ├── postgresql.rs   # PostgreSQL 协议框架
+│   ├── postgresql.rs   # PostgreSQL 协议实现
 │   └── pool.rs         # 连接池
 ├── orm/                # ORM 层
 │   ├── model.rs        # Model trait
@@ -182,11 +184,15 @@ let conn = pool.get_connection().await?;
 - 认证协议框架
 - **状态**: 需要完善，可用作学习
 
-### ⚠️ PostgreSQL（框架支持）
-- TCP 连接建立
-- PostgreSQL StartupMessage
-- 消息发送/接收框架
-- **状态**: 需要完善，可用作学习
+### ✅ PostgreSQL（原生协议，生产可用）
+- 通过 `tokio::net::TcpStream` 建立真实 TCP 连接
+- 完整启动握手（StartupMessage，协议 3.0）
+- 认证：cleartext、MD5、SCRAM-SHA-256（含服务端签名校验）
+- 简单查询协议（`Q`），支持多语句 SQL
+- 扩展查询协议（Parse/Bind/Describe/Execute/Sync），支持参数化语句
+- 行解码：bool、int2/4/8、float4/8、text/varchar、bytea、json/jsonb、date/timestamp/timestamptz、numeric
+- 事务（BEGIN / COMMIT / ROLLBACK）
+- **状态**: 可用于 PostgreSQL 10+ 生产环境
 
 ## 🏃 运行示例
 
@@ -219,7 +225,7 @@ cargo test
 ### 自定义实现
 - **纯 Rust 存储引擎**: StorageEngine（零依赖内存数据库）
 - **MySQL 协议**: MySqlConnection（框架）
-- **PostgreSQL 协议**: PostgresConnection（框架）
+- **PostgreSQL 协议**: PostgresConnection（原生协议实现）
 - **数据类型系统**: SqlValue, Row, QueryResult
 - **连接抽象**: DatabaseConnection trait
 - **事务系统**: Transaction

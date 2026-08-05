@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::marker::PhantomData;
-use crate::db::error::{Result, TormError};
+use crate::db::error::Result;
 use crate::orm::query::Query;
 use crate::db::database::Database;
 use crate::orm::model::Model;
@@ -191,7 +191,7 @@ impl PreloadBuilder {
 
     pub fn build(&self) -> (String, Vec<String>) {
         let mut query = "SELECT * FROM table_name".to_string();
-        let mut bindings = Vec::new();
+        let bindings = Vec::new();
 
         // Add preload logic
         if !self.relations.is_empty() {

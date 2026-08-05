@@ -261,7 +261,7 @@ async fn demonstrate_sql_engine() -> std::result::Result<(), Box<dyn std::error:
     println!("  ✅ Updated {} row(s)", affected);
     
     // Count
-    let count = db.execute("SELECT COUNT(*) FROM users", &[]).await?;
+    let _count = db.execute("SELECT COUNT(*) FROM users", &[]).await?;
     println!("  ✅ Count query executed");
     
     // Delete

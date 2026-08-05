@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use crate::db::db_types::{Row, SqlValue};
 use crate::db::error::Result;
 
 /// Model trait - 所有模型需要实现此接口
@@ -100,6 +101,22 @@ pub trait Model: Send + Sync {
     /// Check if model is soft deleted
     fn is_deleted(&self) -> bool {
         self.deleted_at().is_some()
+    }
+
+    /// Persistable column/value pairs (excluding the primary key).
+    /// Used by `Database::create_model` to build the INSERT statement.
+    fn columns(&self) -> Vec<(&'static str, SqlValue)> {
+        Vec::new()
+    }
+
+    /// Reconstruct a model from a query result row.
+    /// Used by `Database::first_model` / `Database::find_models`.
+    fn from_row(row: &Row) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        let _ = row;
+        None
     }
 }
 

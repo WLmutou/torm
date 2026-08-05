@@ -84,3 +84,25 @@ impl From<crate::db::database::DbError> for TormError {
         }
     }
 }
+
+// Convert from TormError to DbError (used by the GORM-style model persistence API)
+impl From<TormError> for crate::db::database::DbError {
+    fn from(err: TormError) -> Self {
+        match err {
+            TormError::ConnectionError(msg) => crate::db::database::DbError::connection_error(msg),
+            TormError::SerializationError(msg) => {
+                crate::db::database::DbError::ParseError(msg.to_string())
+            }
+            TormError::NotFound => crate::db::database::DbError::NotFound,
+            TormError::InvalidQuery(msg) => crate::db::database::DbError::query_error(msg),
+            TormError::TransactionError(msg) => {
+                crate::db::database::DbError::transaction_error(msg)
+            }
+            TormError::MigrationError(msg) => crate::db::database::DbError::execution_error(msg),
+            TormError::HookError(msg) => crate::db::database::DbError::execution_error(msg),
+            TormError::Unimplemented(msg) => crate::db::database::DbError::protocol_error(msg),
+            TormError::Custom(msg) => crate::db::database::DbError::execution_error(msg),
+            TormError::DatabaseError(msg) => crate::db::database::DbError::execution_error(msg),
+        }
+    }
+}

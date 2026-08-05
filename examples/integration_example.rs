@@ -2,7 +2,7 @@
 // Demonstrating the new database layer functionality
 
 use torm::db::database::Database;
-use torm::orm::query::{QueryBuilder, Query, OrderDirection};
+use torm::orm::query::{QueryBuilder, Query};
 use torm::db::db_types::SqlValue;
 use std::collections::HashMap;
 
@@ -170,14 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count_query = Query::new("users")
         .where_eq("active", true);
     
-    let (count_sql, count_params) = count_query.count();
+    let (count_sql, _count_params) = count_query.count();
     println!("Count SQL: {}", count_sql);
     
     let paginated_query = Query::new("users")
         .where_eq("active", true)
         .paginate(2, 10); // Page 2, 10 per page
     
-    let (page_sql, page_params) = paginated_query.build();
+    let (page_sql, _page_params) = paginated_query.build();
     println!("Pagination SQL: {}", page_sql);
     
     // Example 11: Using update with Query

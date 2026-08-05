@@ -64,11 +64,13 @@ impl MySqlConnection {
         })
     }
 
+    #[allow(dead_code)]
     async fn send_packet(&self, _packet: &[u8]) -> Result<(), DbError> {
         // 框架实现 - 实际 MySQL 协议需要完整的包处理
         Err(DbError::protocol_error("MySQL protocol not fully implemented"))
     }
 
+    #[allow(dead_code)]
     async fn read_packet(&self) -> Result<Vec<u8>, DbError> {
         // 框架实现
         Err(DbError::protocol_error("MySQL protocol not fully implemented"))

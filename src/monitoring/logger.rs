@@ -169,9 +169,7 @@ impl FileLogger {
 
     pub fn rotate(&mut self) -> Result<(), std::io::Error> {
         // Simple rotation - move current file and create new one
-        if let Some(file) = &self.file {
-            drop(file);
-        }
+        let _ = &self.file; // 保持 file 字段引用（占位）
 
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let rotated_path = format!("{}.{}", self.path, timestamp);

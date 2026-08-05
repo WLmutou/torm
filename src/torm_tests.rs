@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::db::error::{Result, TormError};
+    use crate::db::error::TormError;
     use crate::db::db_types::SqlValue;
     use crate::orm::model::{Model, Timestamps};
     use crate::orm::query::{Query, QueryBuilder, OrderDirection};

@@ -324,8 +324,9 @@ impl Migrator {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn load_applied_migrations(&mut self) -> Result<()> {
-        let select_sql = "SELECT version, name FROM schema_migrations ORDER BY version";
+        let _select_sql = "SELECT version, name FROM schema_migrations ORDER BY version";
         
         // This would need actual query execution - simplified for now
         // In a real implementation, this would query the database and populate self.applied_migrations
