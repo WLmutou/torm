@@ -1,4 +1,4 @@
-use crate::db::db_types::{SqlValue, Row, QueryResult, DbType};
+use crate::db::db_types::{SqlValue, QueryResult, DbType};
 use crate::db::database::{DatabaseConnection, DbError, Transaction};
 use std::sync::{Arc, Mutex};
 

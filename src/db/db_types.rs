@@ -1,3 +1,4 @@
+use serde::{Serialize, Deserialize};
 use std::fmt;
 
 /// 数据库驱动类型
@@ -19,7 +20,7 @@ impl fmt::Display for DbType {
 }
 
 /// SQL 值类型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SqlValue {
     Null,
     Bool(bool),

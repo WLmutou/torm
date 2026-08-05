@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 use crate::db::db_types::{SqlValue, Row, QueryResult};
 
 /// 表结构定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnDefinition>,
@@ -10,7 +11,7 @@ pub struct TableSchema {
 }
 
 /// 列定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDefinition {
     pub name: String,
     pub column_type: ColumnType,
@@ -20,7 +21,7 @@ pub struct ColumnDefinition {
 }
 
 /// 列类型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ColumnType {
     Integer,
     BigInt,
@@ -37,6 +38,7 @@ pub struct StorageEngine {
 }
 
 /// 表数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableData {
     pub schema: TableSchema,
     pub rows: Vec<RowData>,
@@ -44,14 +46,14 @@ pub struct TableData {
 }
 
 /// 行数据
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowData {
     pub id: u64,
     pub values: Vec<SqlValue>,
 }
 
 /// 索引
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
     pub columns: Vec<String>,
@@ -59,7 +61,7 @@ pub struct Index {
 }
 
 /// 索引类型
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IndexType {
     BTree,
     Hash,
@@ -70,6 +72,19 @@ impl StorageEngine {
         Self {
             tables: HashMap::new(),
         }
+    }
+
+    pub fn save_to_file(&self, path: &str) -> Result<(), StorageError> {
+        let bytes = self.encode()?;
+        std::fs::write(path, bytes)
+            .map_err(|e| StorageError::IoError(format!("Failed to write file: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn load_from_file(path: &str) -> Result<Self, StorageError> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| StorageError::IoError(format!("Failed to read file: {}", e)))?;
+        Self::decode(&bytes)
     }
 
     /// 创建表
@@ -261,12 +276,13 @@ impl StorageEngine {
             .ok_or_else(|| StorageError::TableNotFound(table_name.to_string()))?;
         
         if where_clause.is_some() {
-            let mut idx = 0;
-            table.rows.retain(|_| {
-                let keep = !to_delete.get(idx).copied().unwrap_or(false);
-                idx += 1;
-                keep
-            });
+            let rows = std::mem::take(&mut table.rows);
+            table.rows = rows
+                .into_iter()
+                .enumerate()
+                .filter(|(idx, _)| !to_delete.get(*idx).copied().unwrap_or(false))
+                .map(|(_, row)| row)
+                .collect();
         } else {
             table.rows.clear();
         }
@@ -392,12 +408,38 @@ impl StorageEngine {
     }
 
     fn like_match(&self, text: &str, pattern: &str) -> bool {
-        // 简单的 LIKE 模式匹配
-        let pattern = pattern.replace("%", ".*").replace("_", ".");
-        match regex_lite::Regex::new(&format!("^{}$", pattern)) {
-            Ok(re) => re.is_match(text),
-            Err(_) => false,
+        let text: Vec<char> = text.chars().collect();
+        let pattern: Vec<char> = pattern.chars().collect();
+        Self::like_matcher(&text, &pattern)
+    }
+
+    fn like_matcher(text: &[char], pattern: &[char]) -> bool {
+        let mut ti = 0;
+        let mut pi = 0;
+        let mut star_idx: Option<usize> = None;
+        let mut match_idx: usize = 0;
+
+        while ti < text.len() {
+            if pi < pattern.len() && (pattern[pi] == '_' || pattern[pi] == text[ti]) {
+                ti += 1;
+                pi += 1;
+            } else if pi < pattern.len() && pattern[pi] == '%' {
+                star_idx = Some(pi);
+                pi += 1;
+            } else if let Some(si) = star_idx {
+                pi = si + 1;
+                match_idx += 1;
+                ti = match_idx;
+            } else {
+                return false;
+            }
         }
+
+        while pi < pattern.len() && pattern[pi] == '%' {
+            pi += 1;
+        }
+
+        pi == pattern.len()
     }
 
     fn row_data_to_row(&self, row_data: &RowData, schema: &TableSchema, 
@@ -428,6 +470,341 @@ impl StorageEngine {
 impl Default for StorageEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================
+// 二进制持久化
+// 自定义二进制格式（无外部依赖），文件头 + 表数据：
+//   Magic: "TORMDB01" (8 bytes)
+//   Version: u32
+//   Table count: u32
+//   每个表: 表名 / 列数 / 列定义 / 主键 / 行数 / 行数据
+// ============================================================
+const DB_MAGIC: &[u8; 8] = b"TORMDB01";
+const DB_VERSION: u32 = 1;
+
+impl StorageEngine {
+    /// 将整个存储引擎编码为二进制字节
+    pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(DB_MAGIC);
+        put_u32(&mut buf, DB_VERSION);
+        put_u32(&mut buf, self.tables.len() as u32);
+
+        // 按表名排序以确保确定性输出
+        let mut table_names: Vec<&String> = self.tables.keys().collect();
+        table_names.sort();
+
+        for name in table_names {
+            let table = &self.tables[name];
+            // 表名
+            put_str(&mut buf, &table.schema.name);
+            // 列数
+            put_u32(&mut buf, table.schema.columns.len() as u32);
+            // 列定义
+            for col in &table.schema.columns {
+                put_str(&mut buf, &col.name);
+                put_u8(&mut buf, column_type_to_u8(&col.column_type));
+                put_u8(&mut buf, col.nullable as u8);
+                put_u8(&mut buf, col.unique as u8);
+                // 默认值
+                match &col.default {
+                    Some(v) => {
+                        put_u8(&mut buf, 1);
+                        put_sql_value(&mut buf, v);
+                    }
+                    None => put_u8(&mut buf, 0),
+                }
+            }
+            // 主键
+            match &table.schema.primary_key {
+                Some(pk) => {
+                    put_u8(&mut buf, 1);
+                    put_str(&mut buf, pk);
+                }
+                None => put_u8(&mut buf, 0),
+            }
+            // 行数
+            put_u64(&mut buf, table.rows.len() as u64);
+            // 行数据
+            for row in &table.rows {
+                put_u64(&mut buf, row.id);
+                put_u32(&mut buf, row.values.len() as u32);
+                for v in &row.values {
+                    put_sql_value(&mut buf, v);
+                }
+            }
+        }
+
+        Ok(buf)
+    }
+
+    /// 从二进制字节解码存储引擎
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
+        let mut reader = Reader::new(bytes);
+
+        // 校验魔数
+        let magic = reader.read_bytes(8)?;
+        if magic != DB_MAGIC.as_slice() {
+            return Err(StorageError::IoError(
+                "Invalid database file: bad magic".to_string(),
+            ));
+        }
+
+        let _version = reader.u32()?;
+        let table_count = reader.u32()? as usize;
+
+        let mut tables: HashMap<String, TableData> = HashMap::new();
+        for _ in 0..table_count {
+            let name = reader.str()?;
+            let column_count = reader.u32()? as usize;
+
+            let mut columns = Vec::with_capacity(column_count);
+            for _ in 0..column_count {
+                let col_name = reader.str()?;
+                let ct = column_type_from_u8(reader.u8()?)?;
+                let nullable = reader.u8()? != 0;
+                let unique = reader.u8()? != 0;
+                let has_default = reader.u8()? != 0;
+                let default = if has_default {
+                    Some(reader.sql_value()?)
+                } else {
+                    None
+                };
+                columns.push(ColumnDefinition {
+                    name: col_name,
+                    column_type: ct,
+                    nullable,
+                    default,
+                    unique,
+                });
+            }
+
+            let has_pk = reader.u8()? != 0;
+            let primary_key = if has_pk {
+                Some(reader.str()?)
+            } else {
+                None
+            };
+
+            let row_count = reader.u64()? as usize;
+            let mut rows = Vec::with_capacity(row_count);
+            for _ in 0..row_count {
+                let id = reader.u64()?;
+                let value_count = reader.u32()? as usize;
+                let mut values = Vec::with_capacity(value_count);
+                for _ in 0..value_count {
+                    values.push(reader.sql_value()?);
+                }
+                rows.push(RowData { id, values });
+            }
+
+            tables.insert(
+                name.clone(),
+                TableData {
+                    schema: TableSchema {
+                        name,
+                        columns,
+                        primary_key,
+                    },
+                    rows,
+                    indexes: HashMap::new(),
+                },
+            );
+        }
+
+        Ok(Self { tables })
+    }
+}
+
+// ---- 编码辅助函数 ----
+
+fn put_u8(buf: &mut Vec<u8>, v: u8) {
+    buf.push(v);
+}
+
+fn put_u32(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_str(buf: &mut Vec<u8>, s: &str) {
+    put_u32(buf, s.len() as u32);
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn put_sql_value(buf: &mut Vec<u8>, v: &SqlValue) {
+    match v {
+        SqlValue::Null => buf.push(0),
+        SqlValue::Bool(b) => {
+            buf.push(1);
+            buf.push(*b as u8);
+        }
+        SqlValue::I8(i) => {
+            buf.push(2);
+            buf.extend_from_slice(&(*i as i32).to_le_bytes());
+        }
+        SqlValue::I16(i) => {
+            buf.push(2);
+            buf.extend_from_slice(&(*i as i32).to_le_bytes());
+        }
+        SqlValue::I32(i) => {
+            buf.push(2);
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        SqlValue::I64(i) => {
+            buf.push(3);
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        SqlValue::F32(f) => {
+            buf.push(4);
+            buf.extend_from_slice(&(*f as f64).to_le_bytes());
+        }
+        SqlValue::F64(f) => {
+            buf.push(4);
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        SqlValue::String(s) => {
+            buf.push(5);
+            put_str(buf, s);
+        }
+        SqlValue::Bytes(b) => {
+            buf.push(6);
+            put_u32(buf, b.len() as u32);
+            buf.extend_from_slice(b);
+        }
+        SqlValue::DateTime(dt) => {
+            buf.push(7);
+            buf.extend_from_slice(&dt.timestamp_nanos_opt().unwrap_or(0).to_le_bytes());
+        }
+        SqlValue::Json(s) => {
+            buf.push(8);
+            put_str(buf, s);
+        }
+    }
+}
+
+fn column_type_to_u8(ct: &ColumnType) -> u8 {
+    match ct {
+        ColumnType::Integer => 0,
+        ColumnType::BigInt => 1,
+        ColumnType::Real => 2,
+        ColumnType::Text => 3,
+        ColumnType::Boolean => 4,
+        ColumnType::Blob => 5,
+        ColumnType::DateTime => 6,
+    }
+}
+
+fn column_type_from_u8(v: u8) -> Result<ColumnType, StorageError> {
+    Ok(match v {
+        0 => ColumnType::Integer,
+        1 => ColumnType::BigInt,
+        2 => ColumnType::Real,
+        3 => ColumnType::Text,
+        4 => ColumnType::Boolean,
+        5 => ColumnType::Blob,
+        6 => ColumnType::DateTime,
+        _ => {
+            return Err(StorageError::IoError(format!(
+                "Invalid column type tag: {}",
+                v
+            )))
+        }
+    })
+}
+
+// ---- 读取辅助 ----
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], StorageError> {
+        if self.pos + len > self.buf.len() {
+            return Err(StorageError::IoError(
+                "Unexpected end of database file".to_string(),
+            ));
+        }
+        let slice = &self.buf[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, StorageError> {
+        Ok(self.read_bytes(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, StorageError> {
+        let b = self.read_bytes(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn u64(&mut self) -> Result<u64, StorageError> {
+        let b = self.read_bytes(8)?;
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
+    fn str(&mut self) -> Result<String, StorageError> {
+        let len = self.u32()? as usize;
+        let bytes = self.read_bytes(len)?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| StorageError::IoError("Invalid UTF-8 in database file".to_string()))
+    }
+
+    fn sql_value(&mut self) -> Result<SqlValue, StorageError> {
+        let tag = self.u8()?;
+        Ok(match tag {
+            0 => SqlValue::Null,
+            1 => SqlValue::Bool(self.u8()? != 0),
+            2 => {
+                let b = self.read_bytes(4)?;
+                SqlValue::I32(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            }
+            3 => {
+                let b = self.read_bytes(8)?;
+                SqlValue::I64(i64::from_le_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ]))
+            }
+            4 => {
+                let b = self.read_bytes(8)?;
+                SqlValue::F64(f64::from_le_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ]))
+            }
+            5 => SqlValue::String(self.str()?),
+            6 => {
+                let len = self.u32()? as usize;
+                SqlValue::Bytes(self.read_bytes(len)?.to_vec())
+            }
+            7 => {
+                let b = self.read_bytes(8)?;
+                let nanos = i64::from_le_bytes([
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                ]);
+                SqlValue::DateTime(chrono::DateTime::from_timestamp_nanos(nanos))
+            }
+            8 => SqlValue::Json(self.str()?),
+            _ => {
+                return Err(StorageError::IoError(format!(
+                    "Invalid value tag: {}",
+                    tag
+                )))
+            }
+        })
     }
 }
 
@@ -484,37 +861,6 @@ impl std::fmt::Display for StorageError {
 }
 
 impl std::error::Error for StorageError {}
-
-/// 简单的正则表达式实现（用于 LIKE 匹配）
-mod regex_lite {
-    pub struct Regex {
-        pattern: String,
-    }
-
-    impl Regex {
-        pub fn new(pattern: &str) -> Result<Self, ()> {
-            Ok(Self {
-                pattern: pattern.to_string(),
-            })
-        }
-
-        pub fn is_match(&self, text: &str) -> bool {
-            // 非常简化的正则实现，只支持基本的通配符
-            if self.pattern == ".*" {
-                return true;
-            }
-            
-            if self.pattern.contains(".*") {
-                let parts: Vec<&str> = self.pattern.split(".*").collect();
-                if parts.len() == 2 {
-                    return text.starts_with(parts[0]) && text.ends_with(parts[1]);
-                }
-            }
-            
-            text == &self.pattern
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

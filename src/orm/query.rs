@@ -399,10 +399,13 @@ impl Query {
         let mut query = format!("UPDATE {} SET ", self.table_name);
         let mut bindings = Vec::new();
 
+        let mut sorted_keys: Vec<&String> = updates.keys().collect();
+        sorted_keys.sort();
+
         let mut set_clauses = Vec::new();
-        for (column, value) in updates {
+        for column in sorted_keys {
             set_clauses.push(format!("{} = ?", column));
-            bindings.push(value.clone());
+            bindings.push(updates[column].clone());
         }
         query.push_str(&set_clauses.join(", "));
 

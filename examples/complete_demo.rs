@@ -6,10 +6,17 @@ use serde::{Deserialize, Serialize};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 TORM - Tokio ORM 示例演示\n");
 
+     
     // 1. 数据库连接示例
     println!("📡 数据库连接示例");
     println!("========================");
     demonstrate_database_connection().await?;
+    println!();
+
+    // 1.1 SQLite 文件 连接示例
+    println!("SQLite 连接示例");
+    println!("========================");
+    demonstrate_database_file_connection().await?;
     println!();
 
     // 2. 查询构建器示例
@@ -130,6 +137,63 @@ impl Model for User {
     fn set_deleted_at(&mut self, timestamp: Option<chrono::DateTime<Utc>>) {
         self.timestamps.deleted_at = timestamp;
     }
+}
+
+async fn demonstrate_database_file_connection() -> Result<(), Box<dyn std::error::Error>> {
+    println!("SQLite 连接:");
+    let dsn = Dsn::new(DBDriver::SQLite, "demo.db");
+    println!("  DSN: {}", dsn.build());
+    
+    let database = Database::sqlite("demo.db").await?;
+    println!("  ✅ 连接成功");
+    println!("  驱动: {:?}", database.db_type());
+    
+    // 测试连接
+    database.ping().await?;
+    println!("  ✅ Ping 成功");
+
+    // 执行 CRUD 操作以触发文件写入
+    database.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)",
+        &[]
+    ).await?;
+    println!("  ✅ 创建表成功");
+
+    database.execute(
+        "INSERT INTO users VALUES (1, 'Alice', 25)",
+        &[]
+    ).await?;
+    database.execute(
+        "INSERT INTO users VALUES (2, 'Bob', 30)",
+        &[]
+    ).await?;
+    println!("  ✅ 插入数据成功");
+
+    let result = database.query("SELECT * FROM users", &[]).await?;
+    println!("  ✅ 查询返回 {} 行", result.rows.len());
+
+    database.close().await?;
+    println!("  ✅ 数据库已关闭，数据已保存到 demo.db");
+    
+    println!();
+    println!("MySQL 连接示例:");
+    let mysql_dsn = Dsn::new(DBDriver::MySQL, "mydb")
+        .with_host("localhost")
+        .with_port(3306)
+        .with_username("user")
+        .with_password("password");
+    println!("  DSN: {}", mysql_dsn.build());
+    
+    println!();
+    println!("PostgreSQL 连接示例:");
+    let pg_dsn = Dsn::new(DBDriver::PostgreSQL, "mydb")
+        .with_host("localhost")
+        .with_port(5432)
+        .with_username("user")
+        .with_password("password");
+    println!("  DSN: {}", pg_dsn.build());
+
+    Ok(())
 }
 
 async fn demonstrate_database_connection() -> Result<(), Box<dyn std::error::Error>> {
