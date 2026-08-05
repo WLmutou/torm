@@ -1,235 +1,265 @@
 # TORM - Tokio ORM
 
-TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）库，提供类似 GORM 的功能，用纯 Rust 实现数据库层。
+TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async runtime, providing GORM-like functionality with a layered module design (Database / ORM / Utils / Monitoring).
 
-## 🎯 核心特性
+## 🎯 Key Features
 
-- ✅ **自定义数据库实现** - 用 Rust 替代 sqlx 库
-- ✅ **SQLite 完整支持** - 生产级 SQLite 实现
-- ✅ **MySQL/PostgreSQL 框架** - 协议框架支持
-- ✅ **最小化依赖** - 仅 6 个核心依赖
-- ✅ **异步/await 支持** - 完全基于 Tokio 异步运行时
-- ✅ **多数据库支持** - MySQL、PostgreSQL、SQLite
-- ✅ **流畅的查询构建器** - 提供简洁直观的查询 API
-- ✅ **模型 Trait** - 自动管理创建时间、更新时间等时间戳
-- ✅ **事务支持** - 支持事务的创建、提交和回滚
-- ✅ **复杂查询** - 支持分页、排序、多条件查询等
+- ✅ **Standard SQLite Support** - Built on rusqlite, generates standard SQLite file format (readable by sqlite3 and other SQLite tools)
+- ✅ **Pure Rust Storage Engine** - Built-in zero-dependency in-memory storage engine (StorageEngine)
+- ✅ **MySQL/PostgreSQL Framework** - Protocol framework support
+- ✅ **Async/await Support** - Fully based on the Tokio async runtime
+- ✅ **Multi-Database Support** - MySQL, PostgreSQL, SQLite
+- ✅ **Fluent Query Builder** - Clean and intuitive query API
+- ✅ **Advanced Queries** - JOIN, GROUP BY, HAVING, aggregate functions
+- ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
+- ✅ **Transaction Support** - Create, commit, and rollback transactions
+- ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
+- ✅ **Logging & Performance Monitoring** - Built-in logging system and performance stats
 
-## 📦 依赖 (极简优化)
+## 📦 Dependencies
 
 ```toml
 [dependencies]
-tokio = "1.53"              # 异步运行时
-rusqlite = "0.30"           # SQLite 实现
-uuid = "1.0"                # UUID 生成
-serde = "1.0"               # 序列化
-serde_json = "1.0"          # JSON 支持
-chrono = "0.4"              # 时间处理
+tokio = "1.53"              # Async runtime
+rusqlite = { version = "0.30", features = ["bundled"] }  # SQLite (standard file format)
+uuid = "1.0"                # UUID generation
+serde = "1.0"               # Serialization
+serde_json = "1.0"          # JSON support
+chrono = "0.4"              # Time handling
+async-trait = "0.1"         # Async traits
+thiserror = "1.0"           # Error derivation
 ```
 
-### 🎯 数据库层实现
+### Database Layer Implementation
 
-| 功能 | 实现方式 | 状态 |
-|------|----------|------|
-| SQLite | rusqlite + 自定义抽象 | ✅ 完整 |
-| MySQL | 自定义协议框架 | ⚠️ 框架 |
-| PostgreSQL | 自定义协议框架 | ⚠️ 框架 |
-| 类型安全 | 自定义 SqlValue | ✅ 完整 |
-| 事务支持 | 自定义实现 | ✅ 完整 |
+| Feature | Implementation | Status |
+|---------|---------------|--------|
+| SQLite | rusqlite (standard file format) | ✅ Complete |
+| In-memory engine | Pure Rust StorageEngine | ✅ Complete |
+| MySQL | Custom protocol framework | ⚠️ Framework |
+| PostgreSQL | Custom protocol framework | ⚠️ Framework |
+| Type safety | Custom SqlValue | ✅ Complete |
+| Transactions | Custom implementation | ✅ Complete |
 
-## 🚀 快速开始
+## 🏗 Module Structure
 
-### 基本使用
+```
+src/
+├── lib.rs              # Module declarations and exports
+├── db/                 # Database layer
+│   ├── db_types.rs     # SQL type system (SqlValue, Row, QueryResult)
+│   ├── database.rs     # Connection abstraction, transactions, factory, Database
+│   ├── driver.rs       # DBDriver, Dsn
+│   ├── error.rs        # TormError
+│   ├── storage.rs      # Pure Rust in-memory storage engine
+│   ├── sqlite.rs       # SQLite implementation (rusqlite backend)
+│   ├── mysql.rs        # MySQL protocol framework
+│   ├── postgresql.rs   # PostgreSQL protocol framework
+│   └── pool.rs         # Connection pools
+├── orm/                # ORM layer
+│   ├── model.rs        # Model trait
+│   ├── query.rs        # Query/QueryBuilder
+│   ├── advanced_query.rs # Advanced queries (JOIN/GROUP BY/aggregates)
+│   ├── relations.rs    # Relationships
+│   └── migration.rs    # Migrations
+├── utils/              # Utils layer (zero-dependency implementations)
+│   ├── simple_pool.rs  # Simple connection pool
+│   ├── simple_lru.rs   # LRU cache
+│   ├── simple_error.rs # Simplified errors
+│   └── simple_uuid.rs  # UUID/ID generation
+└── monitoring/         # Monitoring layer
+    ├── logger.rs       # Logging system
+    └── performance.rs  # Performance monitoring
+```
+
+## 🚀 Quick Start
+
+### Basic Usage
 
 ```rust
-use torm::{ConnectionConfig, ConnectionFactory, SqlValue};
-use torm::SimpleUuid;
+use torm::{Database, SqlValue};
 
 #[tokio::main]
-async fn main() -> torm::SimpleResult<()> {
-    // 1. 创建数据库连接
-    let config = ConnectionConfig::sqlite("mydb.db");
-    let conn = ConnectionFactory::create_connection(config).await?;
-    
-    // 2. 生成 UUID
-    let user_id = SimpleUuid::new_v4();
-    println!("Generated ID: {}", user_id);
-    
-    // 3. 执行查询
-    let result = conn.execute_query("SELECT * FROM users WHERE status = ?", 
-                                   &[SqlValue::String("active".to_string())]).await?;
-    
-    for row in result.rows {
-        println!("User: {:?}", row.get("name"));
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Create a SQLite database (standard SQLite file format)
+    let db = Database::sqlite("mydb.db").await?;
+
+    // 2. Create a table
+    db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)", &[]).await?;
+
+    // 3. Insert data (parameter binding supported)
+    db.execute(
+        "INSERT INTO users (name, age) VALUES (?, ?)",
+        &[SqlValue::String("Alice".to_string()), SqlValue::I32(25)],
+    ).await?;
+
+    // 4. Query data
+    let result = db.query("SELECT * FROM users WHERE age > ?", &[SqlValue::I32(20)]).await?;
+    for row in &result.rows {
+        println!("{:?}", row.get("name"));
     }
-    
+
+    // 5. Transactions
+    let mut tx = db.begin_transaction().await?;
+    tx.execute("INSERT INTO users (name, age) VALUES (?, ?)", &[
+        SqlValue::String("Bob".to_string()),
+        SqlValue::I32(30),
+    ]).await?;
+    tx.commit().await?;
+
+    db.close().await?;
     Ok(())
 }
 ```
 
-### SQLite 生产级支持
+The generated `mydb.db` is a standard SQLite file, directly inspectable with `sqlite3 mydb.db`:
 
-```rust
-// SQLite - 完整支持
-let config = ConnectionConfig::sqlite("mydb.db");
-let conn = ConnectionFactory::create_connection(config).await?;
-
-// 创建表
-conn.execute(
-    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT)",
-    &[]
-).await?;
-
-// 插入数据
-conn.execute(
-    "INSERT INTO users (name, created_at) VALUES (?, ?)",
-    &[
-        SqlValue::String("John".to_string()),
-        SqlValue::DateTime(chrono::Utc::now())
-    ]
-).await?;
-
-// 查询数据
-let result = conn.execute_query("SELECT * FROM users", &[]).await?;
-for row in result.rows {
-    let name: Option<&str> = row.get("name").and_then(|v| v.as_str());
-    println!("User: {:?}", name);
-}
-
-// 事务支持
-let mut tx = conn.begin_transaction().await?;
-tx.execute("INSERT INTO logs (message) VALUES (?)", 
-          &[SqlValue::String("Transaction test".to_string())]).await?;
-tx.commit().await?;
+```bash
+$ sqlite3 mydb.db ".tables"
+users
+$ sqlite3 mydb.db "SELECT * FROM users;"
+1|Alice|25
+2|Bob|30
 ```
 
-## 📚 数据库层特性
-
-### 类型安全的 SQL 值
+### Type-Safe SQL Values
 
 ```rust
-// 自动类型转换
 let value: SqlValue = 42.into();                    // I32(42)
 let value: SqlValue = "hello".into();               // String("hello")
-let value: SqlValue = true.into();                   // Bool(true)
-let value: SqlValue = chrono::Utc::now().into();     // DateTime(...)
+let value: SqlValue = true.into();                  // Bool(true)
+let value = SqlValue::DateTime(chrono::Utc::now()); // DateTime(...)
 
-// SQL 字符串转换
+// SQL string conversion
 let sql = value.to_sql_string();  // "42", "'hello'", "TRUE"
 ```
 
-### 统一错误处理
+### Query Builder
 
 ```rust
-pub enum DbError {
-    ConnectionError(String),
-    QueryError(String),
-    ExecutionError(String),
-    TransactionError(String),
-    // ...
-}
+use torm::QueryBuilder;
 
-// 简化的错误创建
-let error = DbError::connection_error("Failed to connect");
-let error = DbError::query_error("Invalid SQL");
+// Basic query
+let (sql, bindings) = QueryBuilder::new("users")
+    .where_eq("email", "john@example.com")
+    .where_gt("age", 18)
+    .order_by("created_at", "DESC")
+    .limit(10)
+    .build();
+// sql: "SELECT * FROM users WHERE email = ? AND age > ? ORDER BY created_at DESC LIMIT 10"
 ```
 
-### 事务支持
+### Connection Pool
 
 ```rust
-// 显式事务
-let mut tx = conn.begin_transaction().await?;
-tx.execute("INSERT INTO logs (message) VALUES (?)", 
-          &[SqlValue::String("test".to_string())]).await?;
-tx.commit().await?;
+use torm::Pool;
 
-// 自动回滚
-{
-    let tx = conn.begin_transaction().await?;
-    // 操作...
-} // 自动回滚
+let config = torm::ConnectionConfig::sqlite("mydb.db")
+    .with_max_connections(10);
+let pool = Pool::sqlite("mydb.db", torm::PoolConfig::default()).await?;
+let conn = pool.get_connection().await?;
 ```
 
-## 📊 数据库支持状态
+## 📊 Database Support Status
 
-### ✅ SQLite (生产级)
-- 完整的 CRUD 操作
-- 参数化查询
-- 事务支持
-- 外键约束
-- 类型转换
-- **状态**: 可用于生产环境
+### ✅ SQLite (Production-ready, standard file format)
+- Built on rusqlite, generates standard SQLite files (sqlite3 compatible)
+- Full CRUD operations
+- Parameterized queries
+- Transaction support
+- Foreign key constraints
+- **Status**: Ready for production
 
-### ⚠️ MySQL (框架支持)
-- TCP 连接建立
-- MySQL 协议消息结构
-- 认证协议框架
-- **状态**: 需要完善，可用作学习
+### ✅ Pure Rust In-Memory Engine (StorageEngine)
+- Zero-dependency in-memory database
+- Custom binary persistence format (TORMDB01)
+- Full CRUD + WHERE conditions (AND/OR/comparison/LIKE)
+- **Status**: Usable as a lightweight in-memory database
 
-### ⚠️ PostgreSQL (框架支持)
-- TCP 连接建立
+### ⚠️ MySQL (Framework support)
+- TCP connection establishment
+- MySQL protocol message structure
+- Authentication protocol framework
+- **Status**: Needs completion, suitable for learning
+
+### ⚠️ PostgreSQL (Framework support)
+- TCP connection establishment
 - PostgreSQL StartupMessage
-- 消息发送/接收框架
-- **状态**: 需要完善，可用作学习
+- Message send/receive framework
+- **Status**: Needs completion, suitable for learning
 
-## 🏃 运行示例
+## 🏃 Run Examples
 
 ```bash
-# 运行基本使用示例
+# Basic usage example
 cargo run --example basic_usage
 
-# 运行测试
+# Complete feature demo
+cargo run --example complete_demo
+
+# Advanced features demo (relations, migrations, performance)
+cargo run --example advanced_features
+
+# Database integration example
+cargo run --example integration_example
+
+# Run tests
 cargo test
 ```
 
-## 🛠 技术栈
+## 🛠 Tech Stack
 
-### 外部依赖 (仅 6 个)
-- **异步运行时**: Tokio 1.53+
-- **SQLite 实现**: rusqlite 0.30
-- **UUID 生成**: uuid 1.0
-- **序列化**: Serde 1.0
-- **时间处理**: Chrono 0.4
+### External Dependencies
+- **Async Runtime**: Tokio 1.53+
+- **SQLite Implementation**: rusqlite 0.30 (bundled)
+- **UUID Generation**: uuid 1.0
+- **Serialization**: Serde 1.0
+- **Time Handling**: Chrono 0.4
 
-### 自定义实现
-- **MySQL 协议**: MySqlConnection (框架)
-- **PostgreSQL 协议**: PostgresConnection (框架)
-- **SQLite 完整实现**: SqliteConnection (生产级)
-- **数据类型系统**: SqlValue, Row, QueryResult
-- **连接抽象**: DatabaseConnection trait
-- **事务系统**: Transaction
+### Custom Implementations
+- **Pure Rust Storage Engine**: StorageEngine (zero-dependency in-memory database)
+- **MySQL Protocol**: MySqlConnection (framework)
+- **PostgreSQL Protocol**: PostgresConnection (framework)
+- **Type System**: SqlValue, Row, QueryResult
+- **Connection Abstraction**: DatabaseConnection trait
+- **Transaction System**: Transaction
+- **Connection Pools**: Pool / SimplePool
+- **Utilities**: SimpleUuid, SimpleLruCache, SimpleError
 
-## 📚 文档
+## 📚 Documentation
 
-- [README.md](README.md) - 项目概述
-- [DATABASE_REPLACEMENT.md](DATABASE_REPLACEMENT.md) - 数据库层替换详情
-- [DEPENDENCY_OPTIMIZATION.md](DEPENDENCY_OPTIMIZATION.md) - 依赖优化详情
+- [README.md](README.md) - English README
+- [README.zh.md](README.zh.md) - Chinese README
+- [DATABASE_REPLACEMENT.md](DATABASE_REPLACEMENT.md) - Database layer replacement details
+- [DEPENDENCY_OPTIMIZATION.md](DEPENDENCY_OPTIMIZATION.md) - Dependency optimization details
+- [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) - Project summary
 
-## 🎓 学习价值
+## 🎓 Learning Value
 
-TORM 展示了：
-- 如何用 Rust 实现数据库协议
-- 类型安全的数据库抽象设计
-- 异步 I/O 和网络编程
-- MySQL 和 PostgreSQL 协议基础
-- 生产级的 SQLite 实现
+TORM demonstrates:
+- How to implement database protocols in Rust
+- Type-safe database abstraction design
+- Async I/O and network programming
+- MySQL and PostgreSQL protocol fundamentals
+- Production-grade SQLite implementation
+- Zero-dependency utility libraries (UUID, LRU cache, connection pool)
 
-## 🎯 适用场景
+## 🎯 Use Cases
 
-### 生产环境
-- ✅ SQLite 应用（移动、桌面、轻量级 Web）
-- ✅ 需要自定义数据库操作的应用
-- ✅ 对依赖有严格控制的项目
+### Production
+- ✅ SQLite applications (mobile, desktop, lightweight web)
+- ✅ Projects requiring standard SQLite file format (interoperable with other SQLite tools)
+- ✅ Projects with strict dependency control
 
-### 学习开发
-- ✅ 数据库协议学习
-- ✅ Rust 异步编程学习
-- ✅ ORM 设计模式学习
+### Learning & Development
+- ✅ Database protocol learning
+- ✅ Rust async programming
+- ✅ ORM design patterns
 
-## 📝 许可证
+## 📝 License
 
 MIT
 
-## 🤝 贡献
+## 🤝 Contributing
 
-欢迎提交 Issue 和 Pull Request！
+Issues and Pull Requests are welcome!
