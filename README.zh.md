@@ -7,7 +7,7 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 - ✅ **标准 SQLite 支持** - 基于 rusqlite，生成标准 SQLite 文件格式（可被 sqlite3 等工具直接读取）
 - ✅ **纯 Rust 存储引擎** - 内置零依赖的内存存储引擎（StorageEngine）
 - ✅ **PostgreSQL 支持** - 原生协议实现（cleartext / MD5 / SCRAM-SHA-256 认证、参数化查询）
-- ✅ **MySQL 框架** - 协议框架支持
+- ✅ **MySQL 支持** - 原生协议实现（mysql_native_password / caching_sha2_password / sha256_password 认证、文本/二进制协议参数化查询）
 - ✅ **异步/await 支持** - 完全基于 Tokio 异步运行时
 - ✅ **多数据库支持** - MySQL、PostgreSQL、SQLite
 - ✅ **流畅的查询构建器** - 提供简洁直观的查询 API
@@ -30,6 +30,16 @@ serde_json = "1.0"          # JSON 支持
 chrono = "0.4"              # 时间处理
 async-trait = "0.1"         # 异步 trait
 thiserror = "1.0"           # 错误派生
+# PostgreSQL / MySQL 协议认证
+sha2 = "0.10"               # PostgreSQL SCRAM-SHA-256 / MySQL caching_sha2_password
+sha1 = "0.10"               # MySQL mysql_native_password 认证
+md-5 = "0.10"               # PostgreSQL MD5 认证
+hex = "0.4"                 # 字节/十六进制编码
+base64 = "0.22"             # SCRAM base64 编码
+# MySQL caching_sha2_password 全量认证的 RSA 加密（MySQL 8.0+）
+rsa = "0.9"
+num-bigint = "0.4"
+rand = "0.8"
 ```
 
 ### 数据库层实现
@@ -38,7 +48,7 @@ thiserror = "1.0"           # 错误派生
 |------|----------|------|
 | SQLite | rusqlite（标准文件格式） | ✅ 完整 |
 | 内存存储引擎 | 纯 Rust StorageEngine | ✅ 完整 |
-| MySQL | 自定义协议框架 | ⚠️ 框架 |
+| MySQL | 自定义协议（原生实现） | ✅ 完整 |
 | PostgreSQL | 自定义协议（原生实现） | ✅ 完整 |
 | 类型安全 | 自定义 SqlValue | ✅ 完整 |
 | 事务支持 | 自定义实现 | ✅ 完整 |
@@ -55,7 +65,7 @@ src/
 │   ├── error.rs        # TormError
 │   ├── storage.rs      # 纯 Rust 内存存储引擎
 │   ├── sqlite.rs       # SQLite 实现（rusqlite 后端）
-│   ├── mysql.rs        # MySQL 协议框架
+│   ├── mysql.rs        # MySQL 协议实现
 │   ├── postgresql.rs   # PostgreSQL 协议实现
 │   └── pool.rs         # 连接池
 ├── orm/                # ORM 层
@@ -162,6 +172,32 @@ let pool = Pool::sqlite("mydb.db", torm::PoolConfig::default()).await?;
 let conn = pool.get_connection().await?;
 ```
 
+### MySQL 连接
+
+```rust
+use torm::{Database, SqlValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 连接 MySQL（原生协议，支持 mysql_native_password / caching_sha2_password）
+    let db = Database::mysql("localhost", 3306, "mydb", "odoo", "odoo").await?;
+
+    // 参数化查询（COM_STMT_PREPARE / COM_STMT_EXECUTE 二进制协议）
+    db.execute(
+        "INSERT INTO users (name, age) VALUES (?, ?)",
+        &[SqlValue::String("Alice".to_string()), SqlValue::I32(30)],
+    ).await?;
+
+    let result = db.query("SELECT * FROM users WHERE age > ?", &[SqlValue::I32(18)]).await?;
+    for row in &result.rows {
+        println!("{:?}", row.get("name"));
+    }
+
+    db.close().await?;
+    Ok(())
+}
+```
+
 ## 📊 数据库支持状态
 
 ### ✅ SQLite（生产级，标准文件格式）
@@ -178,11 +214,17 @@ let conn = pool.get_connection().await?;
 - 完整的 CRUD + WHERE 条件（AND/OR/比较运算/LIKE）
 - **状态**: 可用作轻量级内存数据库
 
-### ⚠️ MySQL（框架支持）
-- TCP 连接建立
-- MySQL 协议消息结构
-- 认证协议框架
-- **状态**: 需要完善，可用作学习
+### ✅ MySQL（原生协议，生产可用）
+- 通过 `tokio::net::TcpStream` 建立真实 TCP 连接
+- 完整的初始握手（Protocol 10）与握手响应
+- 认证：`mysql_native_password`、`caching_sha2_password`（快速/全量认证，含 RSA 加密）、`sha256_password`
+- AuthSwitchRequest / AuthMoreData 认证切换流程
+- 文本协议（`COM_QUERY`）执行无参数查询
+- 二进制协议（`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`）支持参数化查询
+- 列定义、文本行/二进制行解码、OK/EOF/Error 包
+- 支持 `CLIENT_DEPRECATE_EOF`（MySQL 5.7+）与经典 EOF 协议
+- 事务（BEGIN / COMMIT / ROLLBACK）
+- **状态**: 可用于 MySQL 5.7+ 生产环境
 
 ### ✅ PostgreSQL（原生协议，生产可用）
 - 通过 `tokio::net::TcpStream` 建立真实 TCP 连接
@@ -224,7 +266,7 @@ cargo test
 
 ### 自定义实现
 - **纯 Rust 存储引擎**: StorageEngine（零依赖内存数据库）
-- **MySQL 协议**: MySqlConnection（框架）
+- **MySQL 协议**: MySqlConnection（原生协议实现）
 - **PostgreSQL 协议**: PostgresConnection（原生协议实现）
 - **数据类型系统**: SqlValue, Row, QueryResult
 - **连接抽象**: DatabaseConnection trait
@@ -255,6 +297,8 @@ TORM 展示了：
 ### 生产环境
 - ✅ SQLite 应用（移动、桌面、轻量级 Web）
 - ✅ 需要标准 SQLite 文件格式的项目（可与其他 SQLite 工具互操作）
+- ✅ MySQL 应用（Web 服务、企业应用，支持 MySQL 5.7+）
+- ✅ PostgreSQL 应用（Web 服务、企业应用，支持 PostgreSQL 10+）
 - ✅ 对依赖有严格控制的项目
 
 ### 学习开发

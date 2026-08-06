@@ -7,7 +7,7 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **Standard SQLite Support** - Built on rusqlite, generates standard SQLite file format (readable by sqlite3 and other SQLite tools)
 - ✅ **Pure Rust Storage Engine** - Built-in zero-dependency in-memory storage engine (StorageEngine)
 - ✅ **PostgreSQL Support** - Native wire protocol implementation (cleartext / MD5 / SCRAM-SHA-256 auth, parameterized queries)
-- ✅ **MySQL Framework** - Protocol framework support
+- ✅ **MySQL Support** - Native wire protocol implementation (mysql_native_password / caching_sha2_password / sha256_password auth, text/binary protocol parameterized queries)
 - ✅ **Async/await Support** - Fully based on the Tokio async runtime
 - ✅ **Multi-Database Support** - MySQL, PostgreSQL, SQLite
 - ✅ **Fluent Query Builder** - Clean and intuitive query API
@@ -30,10 +30,16 @@ serde_json = "1.0"          # JSON support
 chrono = "0.4"              # Time handling
 async-trait = "0.1"         # Async traits
 thiserror = "1.0"           # Error derivation
-sha2 = "0.10"               # PostgreSQL SCRAM-SHA-256 authentication
+# PostgreSQL / MySQL wire protocol authentication
+sha2 = "0.10"               # PostgreSQL SCRAM-SHA-256 / MySQL caching_sha2_password
+sha1 = "0.10"               # MySQL mysql_native_password authentication
 md-5 = "0.10"               # PostgreSQL MD5 authentication
 hex = "0.4"                 # Byte/hex encoding
 base64 = "0.22"             # SCRAM base64 encoding
+# RSA encryption for MySQL caching_sha2_password full auth (MySQL 8.0+)
+rsa = "0.9"
+num-bigint = "0.4"
+rand = "0.8"
 ```
 
 ### Database Layer Implementation
@@ -42,7 +48,7 @@ base64 = "0.22"             # SCRAM base64 encoding
 |---------|---------------|--------|
 | SQLite | rusqlite (standard file format) | ✅ Complete |
 | In-memory engine | Pure Rust StorageEngine | ✅ Complete |
-| MySQL | Custom protocol framework | ⚠️ Framework |
+| MySQL | Custom wire protocol (native) | ✅ Complete |
 | PostgreSQL | Custom wire protocol (native) | ✅ Complete |
 | Type safety | Custom SqlValue | ✅ Complete |
 | Transactions | Custom implementation | ✅ Complete |
@@ -59,7 +65,7 @@ src/
 │   ├── error.rs        # TormError
 │   ├── storage.rs      # Pure Rust in-memory storage engine
 │   ├── sqlite.rs       # SQLite implementation (rusqlite backend)
-│   ├── mysql.rs        # MySQL protocol framework
+│   ├── mysql.rs        # MySQL wire protocol implementation
 │   ├── postgresql.rs   # PostgreSQL wire protocol implementation
 │   └── pool.rs         # Connection pools
 ├── orm/                # ORM layer
@@ -166,6 +172,32 @@ let pool = Pool::sqlite("mydb.db", torm::PoolConfig::default()).await?;
 let conn = pool.get_connection().await?;
 ```
 
+### MySQL Connection
+
+```rust
+use torm::{Database, SqlValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect to MySQL (native protocol, supports mysql_native_password / caching_sha2_password)
+    let db = Database::mysql("localhost", 3306, "mydb", "odoo", "odoo").await?;
+
+    // Parameterized query (COM_STMT_PREPARE / COM_STMT_EXECUTE binary protocol)
+    db.execute(
+        "INSERT INTO users (name, age) VALUES (?, ?)",
+        &[SqlValue::String("Alice".to_string()), SqlValue::I32(30)],
+    ).await?;
+
+    let result = db.query("SELECT * FROM users WHERE age > ?", &[SqlValue::I32(18)]).await?;
+    for row in &result.rows {
+        println!("{:?}", row.get("name"));
+    }
+
+    db.close().await?;
+    Ok(())
+}
+```
+
 ## 📊 Database Support Status
 
 ### ✅ SQLite (Production-ready, standard file format)
@@ -182,11 +214,17 @@ let conn = pool.get_connection().await?;
 - Full CRUD + WHERE conditions (AND/OR/comparison/LIKE)
 - **Status**: Usable as a lightweight in-memory database
 
-### ⚠️ MySQL (Framework support)
-- TCP connection establishment
-- MySQL protocol message structure
-- Authentication protocol framework
-- **Status**: Needs completion, suitable for learning
+### ✅ MySQL (Native wire protocol, production-ready)
+- Real TCP connection via `tokio::net::TcpStream`
+- Full initial handshake (Protocol 10) and handshake response
+- Authentication: `mysql_native_password`, `caching_sha2_password` (fast/full auth with RSA encryption), `sha256_password`
+- AuthSwitchRequest / AuthMoreData auth exchange flow
+- Text protocol (`COM_QUERY`) for parameterless queries
+- Binary protocol (`COM_STMT_PREPARE` / `COM_STMT_EXECUTE`) for parameterized queries
+- Column definition, text-row / binary-row decoding, OK/EOF/Error packets
+- Supports `CLIENT_DEPRECATE_EOF` (MySQL 5.7+) and classic EOF protocol
+- Transactions (BEGIN / COMMIT / ROLLBACK)
+- **Status**: Ready for production use with MySQL 5.7+
 
 ### ✅ PostgreSQL (Native wire protocol, production-ready)
 - Real TCP connection via `tokio::net::TcpStream`
@@ -228,7 +266,7 @@ cargo test
 
 ### Custom Implementations
 - **Pure Rust Storage Engine**: StorageEngine (zero-dependency in-memory database)
-- **MySQL Protocol**: MySqlConnection (framework)
+- **MySQL Protocol**: MySqlConnection (native wire protocol)
 - **PostgreSQL Protocol**: PostgresConnection (native wire protocol)
 - **Type System**: SqlValue, Row, QueryResult
 - **Connection Abstraction**: DatabaseConnection trait
@@ -259,6 +297,8 @@ TORM demonstrates:
 ### Production
 - ✅ SQLite applications (mobile, desktop, lightweight web)
 - ✅ Projects requiring standard SQLite file format (interoperable with other SQLite tools)
+- ✅ MySQL applications (web services, enterprise apps, supports MySQL 5.7+)
+- ✅ PostgreSQL applications (web services, enterprise apps, supports PostgreSQL 10+)
 - ✅ Projects with strict dependency control
 
 ### Learning & Development
