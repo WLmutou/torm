@@ -324,12 +324,17 @@ impl Database {
     /// GORM-style create: INSERT the model, running the `before_create`/`after_create` hooks.
     /// Builds the INSERT from `Model::columns()` plus `created_at`/`updated_at`
     /// (set by the `before_create` hook; the table must include those columns).
+    /// Automatically retrieves the auto-generated primary key and sets it via `model.set_id()`.
     pub async fn create_model<M: Model>(&self, model: &mut M) -> Result<(), DbError> {
         model.before_create()?;
 
+        let had_id = model.id().is_some();
+
         let mut columns: Vec<(&str, SqlValue)> = Vec::new();
-        if let Some(id) = model.id() {
-            columns.push((M::primary_key(), SqlValue::String(id)));
+        if had_id {
+            if let Some(id) = model.id() {
+                columns.push((M::primary_key(), SqlValue::String(id)));
+            }
         }
         columns.extend(model.columns());
         if let Some(ts) = model.created_at() {
@@ -346,15 +351,52 @@ impl Database {
 
         let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
         let values: Vec<SqlValue> = columns.into_iter().map(|(_, value)| value).collect();
-        let placeholders = placeholders(self.db_type(), values.len());
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            M::table_name(),
-            names.join(", "),
-            placeholders.join(", ")
-        );
+        let phs = placeholders(self.db_type(), values.len());
 
-        self.execute(&sql, &values).await?;
+        match self.db_type() {
+            DbType::PostgreSQL => {
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+                    M::table_name(),
+                    names.join(", "),
+                    phs.join(", "),
+                    M::primary_key()
+                );
+                let result = self.query(&sql, &values).await?;
+                if !had_id {
+                    if let Some(row) = result.rows.first() {
+                        if let Some(id_val) = row.get(M::primary_key()) {
+                            if let Some(i) = id_val.as_i64() {
+                                model.set_id(i.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    M::table_name(),
+                    names.join(", "),
+                    phs.join(", "),
+                );
+                self.execute(&sql, &values).await?;
+                if !had_id {
+                    let id_sql = match self.db_type() {
+                        DbType::MySQL => "SELECT LAST_INSERT_ID() AS id",
+                        DbType::SQLite => "SELECT last_insert_rowid() AS id",
+                        _ => unreachable!(),
+                    };
+                    let result = self.query(id_sql, &[]).await?;
+                    if let Some(row) = result.rows.first() {
+                        if let Some(i) = row.get("id").and_then(|v| v.as_i64()) {
+                            model.set_id(i.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         model.after_create()?;
         Ok(())
     }

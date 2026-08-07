@@ -177,6 +177,8 @@ pub enum WhereCondition {
     IsNotNull(String),
     Or(Box<WhereCondition>),
     And(Box<WhereCondition>),
+    /// 一组用 OR 连接的条件，整体作为 `(A OR B OR C)` 参与外部 AND 连接
+    OrGroup(Vec<WhereCondition>),
     Raw(String),
 }
 
@@ -270,6 +272,12 @@ impl Query {
 
     pub fn where_raw(mut self, condition: &str) -> Self {
         self.where_conditions.push(WhereCondition::Raw(condition.to_string()));
+        self
+    }
+
+    /// 一组用 OR 连接的条件，渲染为 `(A OR B)` 并与外部条件 AND 连接
+    pub fn where_or(mut self, conditions: Vec<WhereCondition>) -> Self {
+        self.where_conditions.push(WhereCondition::OrGroup(conditions));
         self
     }
 
@@ -394,6 +402,20 @@ impl Query {
         (query, bindings)
     }
 
+    /// 构建 INSERT 语句（使用 `?` 占位符，配合方言转换执行）
+    pub fn insert(&self, columns: &[(&str, SqlValue)]) -> (String, Vec<SqlValue>) {
+        let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+        let values: Vec<SqlValue> = columns.iter().map(|(_, value)| value.clone()).collect();
+        let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.table_name,
+            names.join(", "),
+            placeholders.join(", ")
+        );
+        (sql, values)
+    }
+
     pub fn update(&self, updates: &HashMap<String, SqlValue>) -> (String, Vec<SqlValue>) {
         let mut query = format!("UPDATE {} SET ", self.table_name);
         let mut bindings = Vec::new();
@@ -456,6 +478,16 @@ impl WhereCondition {
             WhereCondition::And(cond) => {
                 let (sql, bindings) = cond.to_sql();
                 (format!("AND ({})", sql), bindings)
+            }
+            WhereCondition::OrGroup(conds) => {
+                let mut clauses = Vec::new();
+                let mut bindings = Vec::new();
+                for cond in conds {
+                    let (clause, mut b) = cond.to_sql();
+                    clauses.push(clause);
+                    bindings.append(&mut b);
+                }
+                (format!("({})", clauses.join(" OR ")), bindings)
             }
             WhereCondition::Raw(raw) => (raw.clone(), vec![]),
         }
