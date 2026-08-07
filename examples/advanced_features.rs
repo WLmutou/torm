@@ -59,19 +59,19 @@ fn demonstrate_relations() -> std::result::Result<(), Box<dyn std::error::Error>
     // BelongsTo
     let posts_relation = torm::orm::relations::BelongsTo::<Post, User>::new("user_id");
     let query = posts_relation.load("user_123");
-    let (sql, _) = query.build();
+    let (sql, _) = query.build().return_sql();
     println!("  帖子属于用户: {}", sql);
     
     // HasMany
     let users_posts = torm::orm::relations::HasMany::<User, Post>::new("user_id");
     let query = users_posts.load("user_123");
-    let (sql, _) = query.build();
+    let (sql, _) = query.build().return_sql();
     println!("  用户有多个帖子: {}", sql);
     
     // ManyToMany
     let user_roles = torm::orm::relations::ManyToMany::<User, Role>::new("role_id", "user_roles");
     let query = user_roles.load("user_123");
-    let (sql, _) = query.build();
+    let (sql, _) = query.build().return_sql();
     println!("  用户有多个角色: {}", sql);
 
     println!();

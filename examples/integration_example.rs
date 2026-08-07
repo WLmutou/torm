@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .order_by_desc("created_at")
         .limit(20);
     
-    let (sql, params) = query.build();
+    let (sql, params) = query.build().return_sql();
     println!("Generated SQL: {}", sql);
     println!("Parameters: {:?}", params);
     
@@ -161,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .order_by_asc("age")
         .limit(5);
     
-    let (sql, params) = query.build();
+    let (sql, params) = query.build().return_sql();
     println!("Generated SQL: {}", sql);
     println!("Parameters: {:?}", params);
     
@@ -170,14 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count_query = Query::new("users")
         .where_eq("active", true);
     
-    let (count_sql, _count_params) = count_query.count();
+    let (count_sql, _count_params) = count_query.count().return_sql();
     println!("Count SQL: {}", count_sql);
     
     let paginated_query = Query::new("users")
         .where_eq("active", true)
         .paginate(2, 10); // Page 2, 10 per page
     
-    let (page_sql, _page_params) = paginated_query.build();
+    let (page_sql, _page_params) = paginated_query.build().return_sql();
     println!("Pagination SQL: {}", page_sql);
     
     // Example 11: Using update with Query
@@ -189,18 +189,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let update_query = Query::new("users")
         .where_lt("age", 25);
     
-    let (update_sql, update_params) = update_query.update(&updates);
-    println!("Update SQL: {}", update_sql);
-    println!("Update params: {:?}", update_params);
+    let affected = update_query.update(&updates, &db).await?;
+    println!("Update SQL: {}", update_query.return_sql().0);
+    println!("Update affected rows: {}", affected);
     
     // Example 12: Using delete with Query
     println!("\n=== Example 12: Query Delete ===");
     let delete_query = Query::new("users")
         .where_null("email");
     
-    let (delete_sql, delete_params) = delete_query.delete();
-    println!("Delete SQL: {}", delete_sql);
-    println!("Delete params: {:?}", delete_params);
+    let affected = delete_query.delete(&db).await?;
+    println!("Delete SQL: {}", delete_query.return_sql().0);
+    println!("Delete affected rows: {}", affected);
     
     // Cleanup
     db.close().await?;

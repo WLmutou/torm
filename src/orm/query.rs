@@ -1,5 +1,102 @@
-use crate::db::db_types::SqlValue;
+use crate::db::database::{Database, DbError};
+use crate::db::db_types::{DbType, QueryResult, SqlValue};
 use std::collections::HashMap;
+
+/// 一条已构建好、可立即执行的 SQL 语句及其绑定参数。
+///
+/// 由 [`Query::build`]、[`Query::count`]、[`Query::insert`]、
+/// [`Query::update`]、[`Query::delete`] 等返回。
+///
+/// 提供两种使用方式：
+/// - [`SqlStatement::execute`] / [`SqlStatement::query`]：直接对数据库执行。
+/// - [`SqlStatement::return_sql`]：仅查看生成的 SQL 与参数（`(sql, params)`）。
+#[derive(Clone)]
+pub struct SqlStatement {
+    sql: String,
+    params: Vec<SqlValue>,
+}
+
+impl SqlStatement {
+    pub(crate) fn new(sql: String, params: Vec<SqlValue>) -> Self {
+        Self { sql, params }
+    }
+
+    /// 返回生成的 SQL 文本。
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// 返回绑定的参数。
+    pub fn params(&self) -> &[SqlValue] {
+        &self.params
+    }
+
+    /// 查看 SQL 与绑定参数，返回 `(sql, params)`。
+    pub fn return_sql(&self) -> (String, Vec<SqlValue>) {
+        (self.sql.clone(), self.params.clone())
+    }
+
+    /// 直接执行写语句（INSERT / UPDATE / DELETE / DDL），返回受影响行数。
+    ///
+    /// 会根据数据库方言自动转换占位符（PostgreSQL 使用 `$n`，SQLite / MySQL 使用 `?`）。
+    pub async fn execute(&self, db: &Database) -> Result<u64, DbError> {
+        let sql = match db.db_type() {
+            DbType::PostgreSQL => convert_placeholders(&self.sql),
+            _ => self.sql.clone(),
+        };
+        db.execute(&sql, &self.params).await
+    }
+
+    /// 直接执行查询（SELECT / COUNT），返回查询结果集。
+    pub async fn query(&self, db: &Database) -> Result<QueryResult, DbError> {
+        let sql = match db.db_type() {
+            DbType::PostgreSQL => convert_placeholders(&self.sql),
+            _ => self.sql.clone(),
+        };
+        db.query(&sql, &self.params).await
+    }
+}
+
+/// 将 SQL 中的 `?` 占位符转换为 PostgreSQL 的 `$1/$2/...`。
+/// 跳过单引号字符串字面量（含 `''` 转义）与 `--` 行注释。
+pub(crate) fn convert_placeholders(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut in_single = false;
+    let mut n: usize = 0;
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_single {
+            out.push(c);
+            if c == '\'' {
+                if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                    out.push('\'');
+                    i += 1;
+                } else {
+                    in_single = false;
+                }
+            }
+        } else if c == '\'' {
+            in_single = true;
+            out.push(c);
+        } else if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            while i < chars.len() && chars[i] != '\n' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        } else if c == '?' {
+            n += 1;
+            out.push('$');
+            out.push_str(&n.to_string());
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
 
 pub struct QueryBuilder {
     table_name: String,
@@ -159,6 +256,10 @@ pub struct Query {
     where_conditions: Vec<WhereCondition>,
     orders: Vec<OrderClause>,
     pagination: Option<Pagination>,
+    /// 最近一次构建或执行的操作（INSERT/UPDATE/DELETE/SELECT/COUNT）所生成的 SQL。
+    /// 通过 [`Query::return_sql`] 可随时查看。
+    /// 使用 `RwLock` 而非 `RefCell`，保证 `Query: Sync`（可在 async 上下文中共享）。
+    last_sql: std::sync::RwLock<SqlStatement>,
 }
 
 #[derive(Clone)]
@@ -207,6 +308,10 @@ impl Query {
             where_conditions: Vec::new(),
             orders: Vec::new(),
             pagination: None,
+            last_sql: std::sync::RwLock::new(SqlStatement::new(
+                format!("SELECT * FROM {}", table_name),
+                Vec::new(),
+            )),
         }
     }
 
@@ -331,7 +436,7 @@ impl Query {
         self
     }
 
-    pub fn build(&self) -> (String, Vec<SqlValue>) {
+    pub fn build(&self) -> SqlStatement {
         let mut query = format!("SELECT * FROM {}", self.table_name);
         let mut bindings = Vec::new();
 
@@ -363,11 +468,71 @@ impl Query {
             }
         }
 
-        (query, bindings)
+        let stmt = SqlStatement::new(query, bindings);
+        self.record(stmt.clone());
+        stmt
     }
 
-    pub fn count(&self) -> (String, Vec<SqlValue>) {
+    pub fn count(&self) -> SqlStatement {
+        let stmt = self.build_count_inner();
+        self.record(stmt.clone());
+        stmt
+    }
+
+    /// 仅构建 COUNT 语句（不执行），返回 `SqlStatement`，可用 `.return_sql()` 查看 SQL。
+    pub fn build_count(&self) -> SqlStatement {
+        let stmt = self.build_count_inner();
+        self.record(stmt.clone());
+        stmt
+    }
+
+    /// 直接执行 DELETE，返回受影响行数。可通过 [`Query::return_sql`] 查看 SQL。
+    pub async fn delete(&self, db: &Database) -> Result<u64, DbError> {
+        let stmt = self.build_delete();
+        self.record(stmt.clone());
+        stmt.execute(db).await
+    }
+
+    /// 直接执行 INSERT，返回受影响行数。可通过 [`Query::return_sql`] 查看 SQL。
+    pub async fn insert(
+        &self,
+        columns: &[(&str, SqlValue)],
+        db: &Database,
+    ) -> Result<u64, DbError> {
+        let stmt = self.build_insert(columns);
+        self.record(stmt.clone());
+        stmt.execute(db).await
+    }
+
+    /// 直接执行 UPDATE，返回受影响行数。可通过 [`Query::return_sql`] 查看 SQL。
+    pub async fn update(
+        &self,
+        updates: &HashMap<String, SqlValue>,
+        db: &Database,
+    ) -> Result<u64, DbError> {
+        let stmt = self.build_update(updates);
+        self.record(stmt.clone());
+        stmt.execute(db).await
+    }
+
+    /// 查看最近一次构建或执行的操作所生成的 SQL 与参数，返回 `(sql, params)`。
+    pub fn return_sql(&self) -> (String, Vec<SqlValue>) {
+        self.last_sql
+            .read()
+            .map(|s| s.return_sql())
+            .unwrap_or_else(|_| (String::new(), Vec::new()))
+    }
+
+    fn record(&self, stmt: SqlStatement) {
+        let Ok(mut guard) = self.last_sql.write() else {
+            return;
+        };
+        *guard = stmt;
+    }
+
+    fn build_count_inner(&self) -> SqlStatement {
         let mut query = format!("SELECT COUNT(*) FROM {}", self.table_name);
+
         let mut bindings = Vec::new();
 
         if !self.where_conditions.is_empty() {
@@ -381,10 +546,11 @@ impl Query {
             query.push_str(&where_clauses.join(" AND "));
         }
 
-        (query, bindings)
+        SqlStatement::new(query, bindings)
     }
 
-    pub fn delete(&self) -> (String, Vec<SqlValue>) {
+    /// 仅构建 DELETE 语句（不执行），返回 `SqlStatement`，可用 `.return_sql()` 查看 SQL。
+    pub fn build_delete(&self) -> SqlStatement {
         let mut query = format!("DELETE FROM {}", self.table_name);
         let mut bindings = Vec::new();
 
@@ -399,11 +565,11 @@ impl Query {
             query.push_str(&where_clauses.join(" AND "));
         }
 
-        (query, bindings)
+        SqlStatement::new(query, bindings)
     }
 
-    /// 构建 INSERT 语句（使用 `?` 占位符，配合方言转换执行）
-    pub fn insert(&self, columns: &[(&str, SqlValue)]) -> (String, Vec<SqlValue>) {
+    /// 仅构建 INSERT 语句（不执行），返回 `SqlStatement`，可用 `.return_sql()` 查看 SQL。
+    pub fn build_insert(&self, columns: &[(&str, SqlValue)]) -> SqlStatement {
         let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
         let values: Vec<SqlValue> = columns.iter().map(|(_, value)| value.clone()).collect();
         let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
@@ -413,10 +579,11 @@ impl Query {
             names.join(", "),
             placeholders.join(", ")
         );
-        (sql, values)
+        SqlStatement::new(sql, values)
     }
 
-    pub fn update(&self, updates: &HashMap<String, SqlValue>) -> (String, Vec<SqlValue>) {
+    /// 仅构建 UPDATE 语句（不执行），返回 `SqlStatement`，可用 `.return_sql()` 查看 SQL。
+    pub fn build_update(&self, updates: &HashMap<String, SqlValue>) -> SqlStatement {
         let mut query = format!("UPDATE {} SET ", self.table_name);
         let mut bindings = Vec::new();
 
@@ -441,7 +608,7 @@ impl Query {
             query.push_str(&where_clauses.join(" AND "));
         }
 
-        (query, bindings)
+        SqlStatement::new(query, bindings)
     }
 }
 
@@ -548,7 +715,7 @@ mod tests {
             .order_by_desc("created_at")
             .limit(20);
 
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE status = ? AND age > ? ORDER BY created_at DESC LIMIT 20");
         assert_eq!(bindings.len(), 2);
     }
@@ -557,7 +724,7 @@ mod tests {
     fn test_query_with_pagination() {
         let query = Query::new("users").paginate(2, 10);
 
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users LIMIT 10 OFFSET 10");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
@@ -568,7 +735,7 @@ mod tests {
             .where_eq("status", "active")
             .where_gt("age", 18);
 
-        let (sql, bindings) = query.count();
+        let (sql, bindings) = query.count().return_sql();
         assert_eq!(sql, "SELECT COUNT(*) FROM users WHERE status = ? AND age > ?");
         assert_eq!(bindings.len(), 2);
     }
@@ -580,7 +747,7 @@ mod tests {
         updates.insert("name".to_string(), SqlValue::String("John Doe".to_string()));
         updates.insert("age".to_string(), SqlValue::I32(25));
 
-        let (sql, bindings) = query.update(&updates);
+        let (sql, bindings) = query.build_update(&updates).return_sql();
         // HashMap 迭代顺序不确定，但应包含所有 set 字段
         assert!(sql.starts_with("UPDATE users SET"));
         assert!(sql.contains("name = ?"));
@@ -593,7 +760,7 @@ mod tests {
     fn test_query_delete() {
         let query = Query::new("users").where_eq("id", "123");
 
-        let (sql, bindings) = query.delete();
+        let (sql, bindings) = query.build_delete().return_sql();
         assert_eq!(sql, "DELETE FROM users WHERE id = ?");
         assert_eq!(bindings.len(), 1);
     }
@@ -606,7 +773,7 @@ mod tests {
             SqlValue::I32(3)
         ]);
 
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE id IN (?, ?, ?)");
         assert_eq!(bindings.len(), 3);
     }
@@ -615,7 +782,7 @@ mod tests {
     fn test_query_where_between() {
         let query = Query::new("users").where_between("age", 18, 65);
 
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE age BETWEEN ? AND ?");
         assert_eq!(bindings.len(), 2);
     }
@@ -624,8 +791,16 @@ mod tests {
     fn test_query_where_null() {
         let query = Query::new("users").where_null("deleted_at");
 
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE deleted_at IS NULL");
         assert_eq!(bindings, Vec::<SqlValue>::new());
+    }
+
+    #[test]
+    fn test_sql_statement_return_sql() {
+        let stmt = Query::new("users").where_eq("id", "1").build();
+        let (sql, params) = stmt.return_sql();
+        assert_eq!(sql, "SELECT * FROM users WHERE id = ?");
+        assert_eq!(params, vec![SqlValue::String("1".to_string())]);
     }
 }

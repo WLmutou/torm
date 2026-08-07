@@ -276,7 +276,7 @@ fn demonstrate_query_builder() {
 
 fn demonstrate_advanced_queries() {
     // 分页查询
-    let (sql, bindings) = Query::new("users").paginate(2, 10).build();
+    let (sql, bindings) = Query::new("users").paginate(2, 10).build().return_sql();
     println!("分页查询 (第2页，每页10条):");
     println!("  SQL: {}", sql);
     println!("  Bindings: {:?}", bindings);
@@ -289,7 +289,8 @@ fn demonstrate_advanced_queries() {
         .where_null("deleted_at")
         .order_by_desc("created_at")
         .limit(20)
-        .build();
+        .build()
+        .return_sql();
     println!();
     println!("多条件查询:");
     println!("  SQL: {}", sql);
@@ -299,32 +300,19 @@ fn demonstrate_advanced_queries() {
     let (sql, bindings) = Query::new("users")
         .where_eq("status", "active")
         .where_null("deleted_at")
-        .count();
+        .count()
+        .return_sql();
     println!();
     println!("计数查询:");
     println!("  SQL: {}", sql);
     println!("  Bindings: {:?}", bindings);
 
-    // 更新查询
-    let mut updates = std::collections::HashMap::new();
-    updates.insert("name".to_string(), SqlValue::String("John Doe Updated".to_string()));
-    updates.insert("age".to_string(), SqlValue::I32(26));
-    updates.insert("status".to_string(), SqlValue::String("verified".to_string()));
-
-    let (sql, bindings) = Query::new("users")
-        .where_eq("id", "123")
-        .update(&updates);
+    // 通过 return_sql() 查看最近一次操作的 SQL 与参数
+    // （INSERT/UPDATE/DELETE 在直接执行时同样会记录，可用 return_sql() 查看）
+    let q = Query::new("users").where_eq("id", "123").where_gt("age", 18);
+    let (sql, bindings) = q.build().return_sql();
     println!();
-    println!("更新查询:");
-    println!("  SQL: {}", sql);
-    println!("  Bindings: {:?}", bindings);
-
-    // 删除查询
-    let (sql, bindings) = Query::new("users")
-        .where_eq("id", "123")
-        .delete();
-    println!();
-    println!("删除查询:");
+    println!("查看最近操作的 SQL (return_sql):");
     println!("  SQL: {}", sql);
     println!("  Bindings: {:?}", bindings);
 }

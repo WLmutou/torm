@@ -28,8 +28,10 @@ pub use db::error::{Result, TormError};
 pub use db::pool::Pool;
 
 // Core exports - ORM 层
-pub use orm::model::Model;
-pub use orm::query::{Query, QueryBuilder};
+pub use orm::model::{Model, Timestamps};
+#[doc(inline)]
+pub use torm_derive::Model;
+pub use orm::query::{Query, QueryBuilder, SqlStatement};
 pub use orm::advanced_query::{AdvancedQuery, JoinType, JoinClause, AggFunction, AggregationClause, OrderClause, Pagination};
 pub use orm::relations::{Relation, RelationType, BelongsTo, HasOne, HasMany, ManyToMany, PreloadBuilder};
 pub use orm::migration::{ColumnType, ColumnDefinition, IndexDefinition, TableDefinition, Migration, MigrationOperation, ForeignKeyDefinition, Migrator, MigrationStatus};

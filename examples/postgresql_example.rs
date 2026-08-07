@@ -9,7 +9,6 @@
 //   psql -h localhost -p 5432 -U odoo -c "CREATE DATABASE tormdb;"
 
 use torm::*;
-use chrono::Utc;
 
 const PG_HOST: &str = "localhost";
 const PG_PORT: u16 = 5432;
@@ -436,7 +435,8 @@ fn demonstrate_query_builder() {
 }
 
 // User model with simplified UUID
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
 pub struct User {
     pub id: String,
     pub name: String,
@@ -470,97 +470,3 @@ impl User {
     }
 }
 
-#[async_trait::async_trait]
-impl Model for User {
-    fn table_name() -> &'static str {
-        "users"
-    }
-
-    fn columns(&self) -> Vec<(&'static str, SqlValue)> {
-        vec![
-            ("name", SqlValue::String(self.name.clone())),
-            ("email", SqlValue::String(self.email.clone())),
-            (
-                "age",
-                match self.age {
-                    Some(age) => SqlValue::I32(age),
-                    None => SqlValue::Null,
-                },
-            ),
-            ("status", SqlValue::String(self.status.clone())),
-        ]
-    }
-
-    fn from_row(row: &Row) -> Option<Self> {
-        let mut timestamps = torm::orm::model::Timestamps::new();
-        timestamps.created_at = row.get("created_at").and_then(|v| match v {
-            SqlValue::DateTime(dt) => Some(*dt),
-            _ => None,
-        });
-        timestamps.updated_at = row.get("updated_at").and_then(|v| match v {
-            SqlValue::DateTime(dt) => Some(*dt),
-            _ => None,
-        });
-        Some(Self {
-            id: row
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            name: row.get("name")?.as_str()?.to_string(),
-            email: row
-                .get("email")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            age: match row.get("age") {
-                Some(SqlValue::Null) | None => None,
-                Some(SqlValue::I32(a)) => Some(*a),
-                Some(SqlValue::I64(a)) => Some(*a as i32),
-                _ => None,
-            },
-            status: row
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("active")
-                .to_string(),
-            timestamps,
-        })
-    }
-
-    fn id(&self) -> Option<String> {
-        if self.id.is_empty() {
-            None
-        } else {
-            Some(self.id.clone())
-        }
-    }
-
-    fn set_id(&mut self, id: String) {
-        self.id = id;
-    }
-
-    fn created_at(&self) -> Option<chrono::DateTime<Utc>> {
-        self.timestamps.created_at
-    }
-
-    fn updated_at(&self) -> Option<chrono::DateTime<Utc>> {
-        self.timestamps.updated_at
-    }
-
-    fn deleted_at(&self) -> Option<chrono::DateTime<Utc>> {
-        self.timestamps.deleted_at
-    }
-
-    fn set_created_at(&mut self, timestamp: chrono::DateTime<Utc>) {
-        self.timestamps.created_at = Some(timestamp);
-    }
-
-    fn set_updated_at(&mut self, timestamp: chrono::DateTime<Utc>) {
-        self.timestamps.updated_at = Some(timestamp);
-    }
-
-    fn set_deleted_at(&mut self, timestamp: Option<chrono::DateTime<Utc>>) {
-        self.timestamps.deleted_at = timestamp;
-    }
-}

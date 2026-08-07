@@ -189,7 +189,7 @@ mod tests {
             .order_by_desc("created_at")
             .limit(20);
         
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE status = ? AND age > ? ORDER BY created_at DESC LIMIT 20");
         assert_eq!(bindings.len(), 2);
     }
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_query_pagination() {
         let query = Query::new("users").paginate(2, 10);
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users LIMIT 10 OFFSET 10");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
@@ -208,7 +208,7 @@ mod tests {
             .where_eq("status", "active")
             .where_null("deleted_at");
         
-        let (sql, bindings) = query.count();
+        let (sql, bindings) = query.count().return_sql();
         assert_eq!(sql, "SELECT COUNT(*) FROM users WHERE status = ? AND deleted_at IS NULL");
         assert_eq!(bindings.len(), 1);
     }
@@ -220,7 +220,7 @@ mod tests {
         updates.insert("name".to_string(), SqlValue::String("John Doe".to_string()));
         updates.insert("age".to_string(), SqlValue::I32(25));
         
-        let (sql, bindings) = query.update(&updates);
+        let (sql, bindings) = query.build_update(&updates).return_sql();
         // HashMap 迭代顺序不确定
         assert!(sql.starts_with("UPDATE users SET"));
         assert!(sql.contains("name = ?"));
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn test_query_delete() {
         let query = Query::new("users").where_eq("id", "123");
-        let (sql, bindings) = query.delete();
+        let (sql, bindings) = query.build_delete().return_sql();
         assert_eq!(sql, "DELETE FROM users WHERE id = ?");
         assert_eq!(bindings.len(), 1);
     }
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_query_default() {
         let query = Query::default();
-        let (sql, _) = query.build();
+        let (sql, _) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM ");
     }
 
@@ -323,7 +323,7 @@ mod tests {
             .where_like("name", "John%")
             .where_like("email", "%@example.com");
         
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE name LIKE ? AND email LIKE ?");
         assert_eq!(bindings.len(), 2);
     }
@@ -334,7 +334,7 @@ mod tests {
             .limit(20)
             .offset(40);
         
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users LIMIT 20 OFFSET 40");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
@@ -347,7 +347,7 @@ mod tests {
                 SqlValue::String("banned".to_string()),
             ]);
         
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE status NOT IN (?, ?)");
         assert_eq!(bindings.len(), 2);
     }
@@ -358,7 +358,7 @@ mod tests {
             .order_by_asc("name")
             .order_by_desc("created_at");
         
-        let (sql, bindings) = query.build();
+        let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users ORDER BY name ASC, created_at DESC");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
@@ -367,32 +367,32 @@ mod tests {
     fn test_query_with_comparison_operators() {
         // Test all comparison operators
         let eq_query = Query::new("users").where_eq("age", 25);
-        let (eq_sql, eq_bindings) = eq_query.build();
+        let (eq_sql, eq_bindings) = eq_query.build().return_sql();
         assert_eq!(eq_sql, "SELECT * FROM users WHERE age = ?");
         assert_eq!(eq_bindings.len(), 1);
 
         let ne_query = Query::new("users").where_ne("status", "active");
-        let (ne_sql, ne_bindings) = ne_query.build();
+        let (ne_sql, ne_bindings) = ne_query.build().return_sql();
         assert_eq!(ne_sql, "SELECT * FROM users WHERE status != ?");
         assert_eq!(ne_bindings.len(), 1);
 
         let gt_query = Query::new("users").where_gt("age", 18);
-        let (gt_sql, gt_bindings) = gt_query.build();
+        let (gt_sql, gt_bindings) = gt_query.build().return_sql();
         assert_eq!(gt_sql, "SELECT * FROM users WHERE age > ?");
         assert_eq!(gt_bindings.len(), 1);
 
         let gte_query = Query::new("users").where_gte("age", 18);
-        let (gte_sql, gte_bindings) = gte_query.build();
+        let (gte_sql, gte_bindings) = gte_query.build().return_sql();
         assert_eq!(gte_sql, "SELECT * FROM users WHERE age >= ?");
         assert_eq!(gte_bindings.len(), 1);
 
         let lt_query = Query::new("users").where_lt("age", 65);
-        let (lt_sql, lt_bindings) = lt_query.build();
+        let (lt_sql, lt_bindings) = lt_query.build().return_sql();
         assert_eq!(lt_sql, "SELECT * FROM users WHERE age < ?");
         assert_eq!(lt_bindings.len(), 1);
 
         let lte_query = Query::new("users").where_lte("age", 65);
-        let (lte_sql, lte_bindings) = lte_query.build();
+        let (lte_sql, lte_bindings) = lte_query.build().return_sql();
         assert_eq!(lte_sql, "SELECT * FROM users WHERE age <= ?");
         assert_eq!(lte_bindings.len(), 1);
     }
@@ -417,7 +417,7 @@ mod tests {
         updates.insert("age".to_string(), SqlValue::I32(25));
         updates.insert("status".to_string(), SqlValue::String("active".to_string()));
         
-        let (sql, bindings) = query.update(&updates);
+        let (sql, bindings) = query.build_update(&updates).return_sql();
         assert!(sql.contains("UPDATE users SET"));
         assert!(sql.contains("WHERE id = ?"));
         assert_eq!(bindings.len(), 5); // 4 update fields + 1 where condition
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn test_query_delete_without_where() {
         let query = Query::new("users");
-        let (sql, bindings) = query.delete();
+        let (sql, bindings) = query.build_delete().return_sql();
         assert_eq!(sql, "DELETE FROM users");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn test_query_count_without_where() {
         let query = Query::new("users");
-        let (sql, bindings) = query.count();
+        let (sql, bindings) = query.count().return_sql();
         assert_eq!(sql, "SELECT COUNT(*) FROM users");
         assert_eq!(bindings, Vec::<SqlValue>::new());
     }
