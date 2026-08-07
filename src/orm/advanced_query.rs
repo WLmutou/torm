@@ -11,7 +11,19 @@ fn safe_column(col: &str) -> String {
     })
 }
 
-/// 校验并规范化表名/别名标识符。
+/// 校验并规范化表名标识符。
+///
+/// 表名可能携带别名（如 `roles r`、`roles AS r`），因此使用宽松校验：
+/// 允许字母/数字/`_`/`$`/`.`/空格（用于别名）与聚合括号，但仍拒绝
+/// `;`、单引号、注释及危险关键字等注入特征。
+fn safe_table(id: &str) -> String {
+    validate_qualified_identifier(id).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe table: {e}");
+        String::new()
+    })
+}
+
+/// 校验并规范化别名标识符（单一标识符，严格校验）。
 fn safe_identifier(id: &str) -> String {
     validate_identifier(id).unwrap_or_else(|e| {
         eprintln!("[torm::sql_safety] rejected unsafe identifier: {e}");
@@ -110,7 +122,7 @@ pub struct Pagination {
 impl AdvancedQuery {
     pub fn new(table_name: &str) -> Self {
         Self {
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             joins: Vec::new(),
             group_bys: Vec::new(),
             having: None,
@@ -140,7 +152,7 @@ impl AdvancedQuery {
     pub fn inner_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Inner,
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -151,7 +163,7 @@ impl AdvancedQuery {
     pub fn left_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Left,
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -162,7 +174,7 @@ impl AdvancedQuery {
     pub fn right_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Right,
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -173,7 +185,7 @@ impl AdvancedQuery {
     pub fn full_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Full,
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -184,7 +196,7 @@ impl AdvancedQuery {
     pub fn join_alias(mut self, join_type: JoinType, table_name: &str, alias: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type,
-            table_name: safe_identifier(table_name),
+            table_name: safe_table(table_name),
             alias: Some(safe_identifier(alias)),
             on_condition: on_condition.to_string(),
         });

@@ -163,6 +163,37 @@ fn advanced_query_neutralizes_malicious_identifiers() {
 }
 
 #[test]
+fn advanced_query_accepts_table_aliases_without_breaking() {
+    // 回归测试：JOIN 表名常携带别名（如 `roles r`、`user_roles ur`），
+    // 这些是合法 SQL，不应被安全校验误伤导致查询 500。
+    let q = AdvancedQuery::new("users u")
+        .select(&["u.id", "r.name AS role_name", "ur.role_id"])
+        .inner_join("user_roles ur", "ur.user_id = u.id")
+        .inner_join("roles r", "r.id = ur.role_id")
+        .where_eq("u.status", "active");
+
+    let (sql, bindings) = q.build_select();
+
+    // 别名应当原样保留在 SQL 中
+    assert!(sql.contains("FROM users u"), "expected alias in FROM, got: {sql}");
+    assert!(sql.contains("INNER JOIN user_roles ur"), "expected join alias, got: {sql}");
+    assert!(sql.contains("INNER JOIN roles r"), "expected join alias, got: {sql}");
+    assert!(sql.contains("r.name AS role_name"), "expected select alias, got: {sql}");
+    // 值仍是参数化绑定
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0], SqlValue::String("active".to_string()));
+}
+
+#[test]
+fn advanced_query_still_rejects_alias_with_injection() {
+    // 即便带别名，表名中混入分号/危险关键字仍应被拒绝
+    let evil = "roles r; DROP TABLE users";
+    let q = AdvancedQuery::new("users").inner_join(evil, "x.id = y.id");
+    let (sql, _) = q.build_select();
+    assert!(!sql.contains("DROP"), "generated SQL must not contain DROP, got: {sql}");
+}
+
+#[test]
 fn malicious_string_values_are_parameterized_not_inlined() {
     // 即使值中包含注入 payload，也会作为绑定参数传递，不会内联进 SQL
     let payload = "'; DROP TABLE users; --";

@@ -1,6 +1,6 @@
 use crate::db::database::{Database, DbError};
 use crate::db::db_types::{DbType, QueryResult, SqlValue};
-use crate::utils::sql_safety::{validate_identifier, validate_qualified_identifier};
+use crate::utils::sql_safety::validate_qualified_identifier;
 use std::collections::HashMap;
 
 /// 校验并规范化 WHERE/ORDER 等子句中的列标识符。
@@ -15,8 +15,12 @@ fn safe_column(col: &str) -> String {
 }
 
 /// 校验并规范化表名标识符。
+///
+/// 表名可能携带别名（如 `roles r`、`roles AS r`），因此使用宽松校验：
+/// 允许字母/数字/`_`/`$`/`.`/空格（用于别名）与聚合括号，但仍拒绝
+/// `;`、单引号、注释及危险关键字等注入特征。
 fn safe_identifier(id: &str) -> String {
-    validate_identifier(id).unwrap_or_else(|e| {
+    validate_qualified_identifier(id).unwrap_or_else(|e| {
         eprintln!("[torm::sql_safety] rejected unsafe identifier: {e}");
         String::new()
     })
