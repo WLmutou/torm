@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-已成功基于 Tokio 实现了一个功能完整的 Rust ORM 库（TORM），完成了 step.md 中第一阶段 MVP 的所有核心功能。
+已成功基于 Tokio 实现了一个功能完整的 Rust ORM 库（TORM）
 
 ## ✅ 已完成功能
 

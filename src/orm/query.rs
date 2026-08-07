@@ -301,6 +301,28 @@ pub struct Pagination {
     pub offset: u64,
 }
 
+/// 一个已绑定数据库连接的查询执行器，由 [`Query::query`] 返回。
+///
+/// 支持链式选择执行方式：
+/// - [`QueryExecutor::count`]：执行 `SELECT COUNT(*)`，返回包含 `COUNT(*)` 列的结果集。
+/// - [`QueryExecutor::select`]：执行 `SELECT *`，返回结果集。
+pub struct QueryExecutor<'a> {
+    query: &'a Query,
+    db: &'a Database,
+}
+
+impl<'a> QueryExecutor<'a> {
+    /// 执行 COUNT 查询，返回含 `COUNT(*)` 列的结果集。
+    pub async fn count(&self) -> Result<QueryResult, DbError> {
+        self.query.count().query(self.db).await
+    }
+
+    /// 执行 SELECT 查询，返回结果集。
+    pub async fn select(&self) -> Result<QueryResult, DbError> {
+        self.query.build().query(self.db).await
+    }
+}
+
 impl Query {
     pub fn new(table_name: &str) -> Self {
         Self {
@@ -521,6 +543,14 @@ impl Query {
             .read()
             .map(|s| s.return_sql())
             .unwrap_or_else(|_| (String::new(), Vec::new()))
+    }
+
+    /// 绑定一个数据库连接，返回一个可继续链式调用的执行器。
+    ///
+    /// 例如：`q.query(&db).count().await` 执行 COUNT 查询，
+    /// `q.query(&db).select().await` 执行 SELECT 查询。
+    pub fn query<'a>(&'a self, db: &'a Database) -> QueryExecutor<'a> {
+        QueryExecutor { query: self, db }
     }
 
     fn record(&self, stmt: SqlStatement) {

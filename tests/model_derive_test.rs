@@ -494,6 +494,24 @@ async fn sql_statement_execute_and_query() {
         .unwrap_or(0);
     assert_eq!(total, 2);
 
+    // QueryExecutor: q.query(db).count() / q.query(db).select()
+    let r = Query::new("users").query(&db).count().await.unwrap();
+    let total = r
+        .rows
+        .first()
+        .and_then(|row| row.get("COUNT(*)"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    assert_eq!(total, 2);
+
+    let r = Query::new("users")
+        .where_eq("age", SqlValue::I32(31))
+        .query(&db)
+        .select()
+        .await
+        .unwrap();
+    assert_eq!(r.rows.len(), 1);
+
     // DELETE 直接执行（Query::delete(db)）
     let affected = Query::new("users")
         .where_eq("name", SqlValue::String("Bob".to_string()))

@@ -11,8 +11,10 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 - ✅ **异步/await 支持** - 完全基于 Tokio 异步运行时
 - ✅ **多数据库支持** - MySQL、PostgreSQL、SQLite
 - ✅ **流畅的查询构建器** - 提供简洁直观的查询 API
+- ✅ **查询直接执行** - `insert` / `update` / `delete` 直接执行 SQL，通过 `return_sql()` 查看
 - ✅ **高级查询** - JOIN、GROUP BY、HAVING、聚合函数
 - ✅ **模型 Trait** - 自动管理创建时间、更新时间等时间戳
+- ✅ **`#[derive(Model)]` 宏** - 从普通结构体自动生成 `Model` 实现，消除样板代码
 - ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create_model` / `first_model` / `find_models` / `update_model` / `delete_model`
 - ✅ **事务支持** - 支持事务的创建、提交和回滚
 - ✅ **连接池** - 支持 SQLite/MySQL/PostgreSQL 连接池
@@ -148,18 +150,91 @@ let sql = value.to_sql_string();  // "42", "'hello'", "TRUE"
 
 ### 查询构建器
 
-```rust
-use torm::QueryBuilder;
+`Query` 提供流畅的构建 API，既可以**直接对数据库执行**，也可以使用 `return_sql()` **查看生成的 SQL**。
 
-// 基本查询
-let (sql, bindings) = QueryBuilder::new("users")
-    .where_eq("email", "john@example.com")
-    .where_gt("age", 18)
-    .order_by("created_at", "DESC")
-    .limit(10)
-    .build();
-// sql: "SELECT * FROM users WHERE email = ? AND age > ? ORDER BY created_at DESC LIMIT 10"
+```rust
+use torm::{Database, Query, SqlValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::sqlite("mydb.db").await?;
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)",
+        &[],
+    ).await?;
+
+    // ---- 写操作直接执行（INSERT / UPDATE / DELETE）----
+    let q = Query::new("users").where_eq("name", SqlValue::String("Alice".to_string()));
+
+    let affected = q.update(
+        &{ let mut m = std::collections::HashMap::new();
+           m.insert("age".to_string(), SqlValue::I32(31)); m },
+        &db,
+    ).await?;                                // 直接执行 UPDATE，返回受影响行数
+
+    // 查看最近一次操作的 SQL 与参数
+    let (sql, params) = q.return_sql();
+    // sql: "UPDATE users SET age = ? WHERE name = ?"
+
+    // insert / delete 同样直接执行
+    Query::new("users").insert(
+        &[("name", SqlValue::String("Bob".to_string())),
+          ("age", SqlValue::I32(25))],
+        &db,
+    ).await?;
+    Query::new("users").where_eq("age", SqlValue::I32(25)).delete(&db).await?;
+
+    // ---- 读操作：通过 query(db) 得到执行器，或通过 build() 得到 SqlStatement ----
+    let result = Query::new("users").query(&db).select().await?;  // 直接执行 SELECT
+    let total = Query::new("users").query(&db).count().await?     // 直接执行 SELECT COUNT(*)
+        .rows.first().and_then(|r| r.get("COUNT(*)")).and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // build().query() 也可以，return_sql() 查看 SQL
+    let result = Query::new("users").where_gt("age", SqlValue::I32(20)).build()
+        .query(&db).await?;                  // 直接执行 SELECT
+    let (sql, _) = Query::new("users").count().return_sql();
+    // sql: "SELECT COUNT(*) FROM users"
+
+    Ok(())
+}
 ```
+
+`Query::query(db)` 返回一个 **`QueryExecutor`** 执行器，可链式选择读操作：
+
+- `QueryExecutor::count()` - 执行 `SELECT COUNT(*)`，返回含 `COUNT(*)` 列的结果集
+- `QueryExecutor::select()` - 执行 `SELECT *`
+
+`Query` 的 `build()` / `count()` / `build_update()` 等也会返回一个 `SqlStatement`，它同时提供执行与查看两种能力：
+
+- `SqlStatement::execute(&db)` / `SqlStatement::query(&db)` - 直接执行
+- `SqlStatement::return_sql()` - 获取 `(sql, params)` 对
+- `Query::return_sql()` - 获取最近一次构建/执行的操作的 `(sql, params)`
+
+> **注意**：SQLite 和 MySQL 使用 `?` 占位符，PostgreSQL 使用 `$1/$2/...`。执行时会自动转换。
+
+### 使用派生宏定义模型
+
+无需手写 `Model` 实现，只需给结构体加上 `#[derive(Model)]` 与 `#[model(table_name = "...")]` 属性。宏会自动生成 `columns()`、`from_row()`、主键访问器以及时间戳访问器。
+
+```rust
+use torm::{Model, Timestamps};
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,                                        // 主键 -> id() / set_id()
+    pub name: String,
+    pub age: Option<i32>,
+    #[model(column = "created_at")]
+    pub created_at: Option<DateTime<Utc>>,              // 独立时间戳字段
+    pub timestamps: Timestamps,                          // 或使用 Timestamps 结构体
+    #[model(skip)]
+    pub role_ids: Option<Vec<i64>>,                      // 非数据库字段，自动跳过
+}
+```
+
+支持的字段类型：`String`、`bool`、`i8/i16/i32/i64`、`f32/f64`、`chrono::DateTime<Utc>`、`Uuid`、`Vec<u8>` 及其 `Option<...>` 包装。其他类型会自动跳过；使用 `#[model(skip)]` 显式排除某个字段，使用 `#[model(column = "...")]` 重命名数据库列名。
 
 ### 连接池
 

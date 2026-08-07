@@ -11,8 +11,10 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **Async/await Support** - Fully based on the Tokio async runtime
 - ✅ **Multi-Database Support** - MySQL, PostgreSQL, SQLite
 - ✅ **Fluent Query Builder** - Clean and intuitive query API
+- ✅ **Query Direct Execution** - `insert` / `update` / `delete` execute SQL directly, inspect with `return_sql()`
 - ✅ **Advanced Queries** - JOIN, GROUP BY, HAVING, aggregate functions
 - ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
+- ✅ **`#[derive(Model)]` Macro** - Generate the `Model` impl from a plain struct, eliminating boilerplate
 - ✅ **GORM-style Model CRUD** - `create_model` / `first_model` / `find_models` / `update_model` / `delete_model` on `Database`
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
@@ -148,18 +150,91 @@ let sql = value.to_sql_string();  // "42", "'hello'", "TRUE"
 
 ### Query Builder
 
-```rust
-use torm::QueryBuilder;
+`Query` provides a fluent builder that can **execute directly** against a `&Database`, or **inspect** the generated SQL with `return_sql()`.
 
-// Basic query
-let (sql, bindings) = QueryBuilder::new("users")
-    .where_eq("email", "john@example.com")
-    .where_gt("age", 18)
-    .order_by("created_at", "DESC")
-    .limit(10)
-    .build();
-// sql: "SELECT * FROM users WHERE email = ? AND age > ? ORDER BY created_at DESC LIMIT 10"
+```rust
+use torm::{Database, Query, SqlValue};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::sqlite("mydb.db").await?;
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)",
+        &[],
+    ).await?;
+
+    // ---- Writes execute directly (INSERT / UPDATE / DELETE) ----
+    let q = Query::new("users").where_eq("name", SqlValue::String("Alice".to_string()));
+
+    let affected = q.update(
+        &{ let mut m = std::collections::HashMap::new();
+           m.insert("age".to_string(), SqlValue::I32(31)); m },
+        &db,
+    ).await?;                                // executes UPDATE, returns affected rows
+
+    // Inspect the SQL & params of the last operation
+    let (sql, params) = q.return_sql();
+    // sql: "UPDATE users SET age = ? WHERE name = ?"
+
+    // Insert / delete execute the same way
+    Query::new("users").insert(
+        &[("name", SqlValue::String("Bob".to_string())),
+          ("age", SqlValue::I32(25))],
+        &db,
+    ).await?;
+    Query::new("users").where_eq("age", SqlValue::I32(25)).delete(&db).await?;
+
+    // ---- Reads: QueryExecutor via query(db), or SqlStatement via build() ----
+    let result = Query::new("users").query(&db).select().await?;  // executes SELECT
+    let total = Query::new("users").query(&db).count().await?     // executes SELECT COUNT(*)
+        .rows.first().and_then(|r| r.get("COUNT(*)")).and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // build().query() also works, and return_sql() inspects the SQL
+    let result = Query::new("users").where_gt("age", SqlValue::I32(20)).build()
+        .query(&db).await?;                  // executes SELECT
+    let (sql, _) = Query::new("users").count().return_sql();
+    // sql: "SELECT COUNT(*) FROM users"
+
+    Ok(())
+}
 ```
+
+`Query::query(db)` returns a **`QueryExecutor`** for chaining read operations:
+
+- `QueryExecutor::count()` - executes `SELECT COUNT(*)`, returning a result set with a `COUNT(*)` column
+- `QueryExecutor::select()` - executes `SELECT *`
+
+`Query` also returns a `SqlStatement` from `build()` / `count()` / `build_update()` / etc., which offers both execution and inspection:
+
+- `SqlStatement::execute(&db)` / `SqlStatement::query(&db)` - run the statement directly
+- `SqlStatement::return_sql()` - get the `(sql, params)` pair
+- `Query::return_sql()` - get the `(sql, params)` of the most recently built / executed operation
+
+> **Note**: SQLite and MySQL use `?` placeholders; PostgreSQL uses `$1/$2/...`. The conversion happens automatically during execution.
+
+### Deriving a Model
+
+Instead of hand-writing the `Model` impl, annotate your struct with `#[derive(Model)]` and a `#[model(table_name = "...")]` attribute. The macro generates `columns()`, `from_row()`, primary-key accessors, and timestamp accessors for you.
+
+```rust
+use torm::{Model, Timestamps};
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,                                        // primary key -> id() / set_id()
+    pub name: String,
+    pub age: Option<i32>,
+    #[model(column = "created_at")]
+    pub created_at: Option<DateTime<Utc>>,              // standalone timestamp field
+    pub timestamps: Timestamps,                          // or a Timestamps struct
+    #[model(skip)]
+    pub role_ids: Option<Vec<i64>>,                      // non-DB field, auto-skipped
+}
+```
+
+Supported field types: `String`, `bool`, `i8/i16/i32/i64`, `f32/f64`, `chrono::DateTime<Utc>`, `Uuid`, `Vec<u8>` and their `Option<...>` wrappers. Other types are skipped automatically; use `#[model(skip)]` to exclude a field explicitly, and `#[model(column = "...")]` to rename a DB column.
 
 ### Connection Pool
 
