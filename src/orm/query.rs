@@ -1,6 +1,26 @@
 use crate::db::database::{Database, DbError};
 use crate::db::db_types::{DbType, QueryResult, SqlValue};
+use crate::utils::sql_safety::{validate_identifier, validate_qualified_identifier};
 use std::collections::HashMap;
+
+/// 校验并规范化 WHERE/ORDER 等子句中的列标识符。
+///
+/// 允许限定名（`users.id`）与聚合写法（`COUNT(*)`），
+/// 拒绝含单引号、分号、注释等危险字符的输入；非法时返回空串并告警。
+fn safe_column(col: &str) -> String {
+    validate_qualified_identifier(col).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe column: {e}");
+        String::new()
+    })
+}
+
+/// 校验并规范化表名标识符。
+fn safe_identifier(id: &str) -> String {
+    validate_identifier(id).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe identifier: {e}");
+        String::new()
+    })
+}
 
 /// 一条已构建好、可立即执行的 SQL 语句及其绑定参数。
 ///
@@ -110,7 +130,7 @@ pub struct QueryBuilder {
 impl QueryBuilder {
     pub fn new(table_name: &str) -> Self {
         Self {
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             conditions: Vec::new(),
             orders: Vec::new(),
             limit: None,
@@ -120,50 +140,50 @@ impl QueryBuilder {
     }
 
     pub fn where_eq(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} = ?", column));
+        self.conditions.push(format!("{} = ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_ne(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} != ?", column));
+        self.conditions.push(format!("{} != ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_gt(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} > ?", column));
+        self.conditions.push(format!("{} > ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_gte(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} >= ?", column));
+        self.conditions.push(format!("{} >= ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_lt(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} < ?", column));
+        self.conditions.push(format!("{} < ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_lte(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} <= ?", column));
+        self.conditions.push(format!("{} <= ?", safe_column(column)));
         self.bindings.push(value.into());
         self
     }
 
     pub fn where_like(mut self, column: &str, pattern: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} LIKE ?", column));
+        self.conditions.push(format!("{} LIKE ?", safe_column(column)));
         self.bindings.push(pattern.into());
         self
     }
 
     pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
         let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
-        self.conditions.push(format!("{} IN ({})", column, placeholders.join(", ")));
+        self.conditions.push(format!("{} IN ({})", safe_column(column), placeholders.join(", ")));
         for value in values {
             self.bindings.push(value);
         }
@@ -172,7 +192,7 @@ impl QueryBuilder {
 
     pub fn where_not_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
         let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
-        self.conditions.push(format!("{} NOT IN ({})", column, placeholders.join(", ")));
+        self.conditions.push(format!("{} NOT IN ({})", safe_column(column), placeholders.join(", ")));
         for value in values {
             self.bindings.push(value);
         }
@@ -180,19 +200,19 @@ impl QueryBuilder {
     }
 
     pub fn where_between(mut self, column: &str, min: impl Into<SqlValue>, max: impl Into<SqlValue>) -> Self {
-        self.conditions.push(format!("{} BETWEEN ? AND ?", column));
+        self.conditions.push(format!("{} BETWEEN ? AND ?", safe_column(column)));
         self.bindings.push(min.into());
         self.bindings.push(max.into());
         self
     }
 
     pub fn where_null(mut self, column: &str) -> Self {
-        self.conditions.push(format!("{} IS NULL", column));
+        self.conditions.push(format!("{} IS NULL", safe_column(column)));
         self
     }
 
     pub fn where_not_null(mut self, column: &str) -> Self {
-        self.conditions.push(format!("{} IS NOT NULL", column));
+        self.conditions.push(format!("{} IS NOT NULL", safe_column(column)));
         self
     }
 
@@ -209,9 +229,9 @@ impl QueryBuilder {
     pub fn order_by(mut self, column: &str, direction: &str) -> Self {
         let direction = direction.to_uppercase();
         if direction == "ASC" || direction == "DESC" {
-            self.orders.push(format!("{} {}", column, direction));
+            self.orders.push(format!("{} {}", safe_column(column), direction));
         } else {
-            self.orders.push(format!("{}", column));
+            self.orders.push(format!("{}", safe_column(column)));
         }
         self
     }
@@ -325,8 +345,9 @@ impl<'a> QueryExecutor<'a> {
 
 impl Query {
     pub fn new(table_name: &str) -> Self {
+        let table_name = safe_identifier(table_name);
         Self {
-            table_name: table_name.to_string(),
+            table_name: table_name.clone(),
             where_conditions: Vec::new(),
             orders: Vec::new(),
             pagination: None,
@@ -420,7 +441,7 @@ impl Query {
 
     pub fn order_by(mut self, column: &str, direction: OrderDirection) -> Self {
         self.orders.push(OrderClause {
-            column: column.to_string(),
+            column: safe_column(column),
             direction,
         });
         self
@@ -645,29 +666,29 @@ impl Query {
 impl WhereCondition {
     pub(crate) fn to_sql(&self) -> (String, Vec<SqlValue>) {
         match self {
-            WhereCondition::Eq(col, val) => (format!("{} = ?", col), vec![val.clone()]),
-            WhereCondition::Ne(col, val) => (format!("{} != ?", col), vec![val.clone()]),
-            WhereCondition::Gt(col, val) => (format!("{} > ?", col), vec![val.clone()]),
-            WhereCondition::Gte(col, val) => (format!("{} >= ?", col), vec![val.clone()]),
-            WhereCondition::Lt(col, val) => (format!("{} < ?", col), vec![val.clone()]),
-            WhereCondition::Lte(col, val) => (format!("{} <= ?", col), vec![val.clone()]),
-            WhereCondition::Like(col, pat) => (format!("{} LIKE ?", col), vec![pat.clone()]),
+            WhereCondition::Eq(col, val) => (format!("{} = ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Ne(col, val) => (format!("{} != ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Gt(col, val) => (format!("{} > ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Gte(col, val) => (format!("{} >= ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Lt(col, val) => (format!("{} < ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Lte(col, val) => (format!("{} <= ?", safe_column(col)), vec![val.clone()]),
+            WhereCondition::Like(col, pat) => (format!("{} LIKE ?", safe_column(col)), vec![pat.clone()]),
             WhereCondition::In(col, vals) => {
                 let placeholders: Vec<String> = vals.iter().map(|_| "?".to_string()).collect();
-                (format!("{} IN ({})", col, placeholders.join(", ")), vals.clone())
+                (format!("{} IN ({})", safe_column(col), placeholders.join(", ")), vals.clone())
             }
             WhereCondition::NotIn(col, vals) => {
                 let placeholders: Vec<String> = vals.iter().map(|_| "?".to_string()).collect();
                 (
-                    format!("{} NOT IN ({})", col, placeholders.join(", ")),
+                    format!("{} NOT IN ({})", safe_column(col), placeholders.join(", ")),
                     vals.clone(),
                 )
             }
             WhereCondition::Between(col, min, max) => {
-                (format!("{} BETWEEN ? AND ?", col), vec![min.clone(), max.clone()])
+                (format!("{} BETWEEN ? AND ?", safe_column(col)), vec![min.clone(), max.clone()])
             }
-            WhereCondition::IsNull(col) => (format!("{} IS NULL", col), vec![]),
-            WhereCondition::IsNotNull(col) => (format!("{} IS NOT NULL", col), vec![]),
+            WhereCondition::IsNull(col) => (format!("{} IS NULL", safe_column(col)), vec![]),
+            WhereCondition::IsNotNull(col) => (format!("{} IS NOT NULL", safe_column(col)), vec![]),
             WhereCondition::Or(cond) => {
                 let (sql, bindings) = cond.to_sql();
                 (format!("OR ({})", sql), bindings)

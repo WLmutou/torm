@@ -1,6 +1,23 @@
 use crate::db::db_types::SqlValue;
 use crate::orm::query::{OrderDirection, WhereCondition};
+use crate::utils::sql_safety::{validate_identifier, validate_qualified_identifier};
 use std::collections::HashMap;
+
+/// 校验并规范化列/表达式标识符（允许 `users.id`、`COUNT(*)`）。
+fn safe_column(col: &str) -> String {
+    validate_qualified_identifier(col).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe column: {e}");
+        String::new()
+    })
+}
+
+/// 校验并规范化表名/别名标识符。
+fn safe_identifier(id: &str) -> String {
+    validate_identifier(id).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe identifier: {e}");
+        String::new()
+    })
+}
 
 /// 高级查询构建器
 pub struct AdvancedQuery {
@@ -93,7 +110,7 @@ pub struct Pagination {
 impl AdvancedQuery {
     pub fn new(table_name: &str) -> Self {
         Self {
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             joins: Vec::new(),
             group_bys: Vec::new(),
             having: None,
@@ -109,7 +126,7 @@ impl AdvancedQuery {
 
     /// SELECT 特定列
     pub fn select(mut self, columns: &[&str]) -> Self {
-        self.select_columns = columns.iter().map(|s| s.to_string()).collect();
+        self.select_columns = columns.iter().map(|s| safe_column(s)).collect();
         self
     }
 
@@ -123,7 +140,7 @@ impl AdvancedQuery {
     pub fn inner_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Inner,
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -134,7 +151,7 @@ impl AdvancedQuery {
     pub fn left_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Left,
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -145,7 +162,7 @@ impl AdvancedQuery {
     pub fn right_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Right,
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -156,7 +173,7 @@ impl AdvancedQuery {
     pub fn full_join(mut self, table_name: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type: JoinType::Full,
-            table_name: table_name.to_string(),
+            table_name: safe_identifier(table_name),
             alias: None,
             on_condition: on_condition.to_string(),
         });
@@ -167,8 +184,8 @@ impl AdvancedQuery {
     pub fn join_alias(mut self, join_type: JoinType, table_name: &str, alias: &str, on_condition: &str) -> Self {
         self.joins.push(JoinClause {
             join_type,
-            table_name: table_name.to_string(),
-            alias: Some(alias.to_string()),
+            table_name: safe_identifier(table_name),
+            alias: Some(safe_identifier(alias)),
             on_condition: on_condition.to_string(),
         });
         self
@@ -176,7 +193,7 @@ impl AdvancedQuery {
 
     /// GROUP BY
     pub fn group_by(mut self, columns: &[&str]) -> Self {
-        self.group_bys = columns.iter().map(|s| s.to_string()).collect();
+        self.group_bys = columns.iter().map(|s| safe_column(s)).collect();
         self
     }
 
@@ -190,7 +207,7 @@ impl AdvancedQuery {
     pub fn count(mut self, column: &str) -> Self {
         self.aggregations.push(AggregationClause {
             function: AggFunction::Count,
-            column: column.to_string(),
+            column: safe_column(column),
             alias: None,
         });
         self
@@ -199,7 +216,7 @@ impl AdvancedQuery {
     pub fn sum(mut self, column: &str) -> Self {
         self.aggregations.push(AggregationClause {
             function: AggFunction::Sum,
-            column: column.to_string(),
+            column: safe_column(column),
             alias: None,
         });
         self
@@ -208,7 +225,7 @@ impl AdvancedQuery {
     pub fn avg(mut self, column: &str) -> Self {
         self.aggregations.push(AggregationClause {
             function: AggFunction::Avg,
-            column: column.to_string(),
+            column: safe_column(column),
             alias: None,
         });
         self
@@ -217,7 +234,7 @@ impl AdvancedQuery {
     pub fn min(mut self, column: &str) -> Self {
         self.aggregations.push(AggregationClause {
             function: AggFunction::Min,
-            column: column.to_string(),
+            column: safe_column(column),
             alias: None,
         });
         self
@@ -226,7 +243,7 @@ impl AdvancedQuery {
     pub fn max(mut self, column: &str) -> Self {
         self.aggregations.push(AggregationClause {
             function: AggFunction::Max,
-            column: column.to_string(),
+            column: safe_column(column),
             alias: None,
         });
         self
@@ -306,7 +323,7 @@ impl AdvancedQuery {
     /// ORDER BY
     pub fn order_by(mut self, column: &str, direction: OrderDirection) -> Self {
         self.orders.push(OrderClause {
-            column: column.to_string(),
+            column: safe_column(column),
             direction,
         });
         self
@@ -472,7 +489,7 @@ impl AdvancedQuery {
 
         let mut set_clauses = Vec::new();
         for (column, value) in updates {
-            set_clauses.push(format!("{} = ?", column));
+            set_clauses.push(format!("{} = ?", safe_column(column)));
             bindings.push(value.clone());
         }
         query.push_str(&set_clauses.join(", "));

@@ -1,6 +1,15 @@
 use crate::db::db_types::{SqlValue, QueryResult, DbType};
 use crate::orm::model::Model;
+use crate::utils::sql_safety::validate_identifier;
 use std::sync::Arc;
+
+/// 校验并规范化表名标识符。
+fn safe_identifier(id: &str) -> String {
+    validate_identifier(id).unwrap_or_else(|e| {
+        eprintln!("[torm::sql_safety] rejected unsafe identifier: {e}");
+        String::new()
+    })
+}
 
 /// 数据库连接 trait
 #[async_trait::async_trait]
@@ -352,20 +361,22 @@ impl Database {
         let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
         let values: Vec<SqlValue> = columns.into_iter().map(|(_, value)| value).collect();
         let phs = placeholders(self.db_type(), values.len());
+        let table_name = safe_identifier(M::table_name());
+        let primary_key = safe_identifier(M::primary_key());
 
         match self.db_type() {
             DbType::PostgreSQL => {
                 let sql = format!(
                     "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-                    M::table_name(),
+                    table_name,
                     names.join(", "),
                     phs.join(", "),
-                    M::primary_key()
+                    primary_key
                 );
                 let result = self.query(&sql, &values).await?;
                 if !had_id {
                     if let Some(row) = result.rows.first() {
-                        if let Some(id_val) = row.get(M::primary_key()) {
+                        if let Some(id_val) = row.get(&primary_key) {
                             if let Some(i) = id_val.as_i64() {
                                 model.set_id(i.to_string());
                             }
@@ -376,7 +387,7 @@ impl Database {
             _ => {
                 let sql = format!(
                     "INSERT INTO {} ({}) VALUES ({})",
-                    M::table_name(),
+                    table_name,
                     names.join(", "),
                     phs.join(", "),
                 );
@@ -406,8 +417,8 @@ impl Database {
         M::before_find()?;
         let sql = format!(
             "SELECT * FROM {} WHERE {} = {} LIMIT 1",
-            M::table_name(),
-            M::primary_key(),
+            safe_identifier(M::table_name()),
+            safe_identifier(M::primary_key()),
             placeholder(self.db_type(), 1)
         );
         let result = self.query(&sql, &[SqlValue::String(id.to_string())]).await?;
@@ -429,7 +440,7 @@ impl Database {
     /// GORM-style find: load all rows of the model's table.
     pub async fn find_models<M: Model>(&self) -> Result<Vec<M>, DbError> {
         M::before_find()?;
-        let sql = format!("SELECT * FROM {}", M::table_name());
+        let sql = format!("SELECT * FROM {}", safe_identifier(M::table_name()));
         let result = self.query(&sql, &[]).await?;
         let mut models = Vec::with_capacity(result.rows.len());
         for row in &result.rows {
@@ -465,20 +476,20 @@ impl Database {
             return Ok(0);
         }
 
-        let mut sql = format!("UPDATE {} SET ", M::table_name());
+        let mut sql = format!("UPDATE {} SET ", safe_identifier(M::table_name()));
         let mut values = Vec::with_capacity(sets.len() + 1);
         for (i, (column, value)) in sets.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
             }
-            sql.push_str(column);
+            sql.push_str(&safe_identifier(column));
             sql.push_str(" = ");
             sql.push_str(&placeholder(self.db_type(), i + 1));
             values.push(value.clone());
         }
         sql.push_str(&format!(
             " WHERE {} = {}",
-            M::primary_key(),
+            safe_identifier(M::primary_key()),
             placeholder(self.db_type(), sets.len() + 1)
         ));
         values.push(SqlValue::String(id));
@@ -497,8 +508,8 @@ impl Database {
         model.before_delete()?;
         let sql = format!(
             "DELETE FROM {} WHERE {} = {}",
-            M::table_name(),
-            M::primary_key(),
+            safe_identifier(M::table_name()),
+            safe_identifier(M::primary_key()),
             placeholder(self.db_type(), 1)
         );
         let affected = self.execute(&sql, &[SqlValue::String(id)]).await?;

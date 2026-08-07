@@ -18,6 +18,7 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **GORM-style Model CRUD** - `create_model` / `first_model` / `find_models` / `update_model` / `delete_model` on `Database`
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
+- ✅ **SQL Injection Protection** - Identifier validation/quotation, string escaping, and dangerous-pattern detection (`utils::sql_safety`)
 - ✅ **Logging & Performance Monitoring** - Built-in logging system and performance stats
 
 ## 📦 Dependencies
@@ -80,7 +81,8 @@ src/
 │   ├── simple_pool.rs  # Simple connection pool
 │   ├── simple_lru.rs   # LRU cache
 │   ├── simple_error.rs # Simplified errors
-│   └── simple_uuid.rs  # UUID/ID generation
+│   ├── simple_uuid.rs  # UUID/ID generation
+│   └── sql_safety.rs   # SQL injection protection (identifiers, escaping, detection)
 └── monitoring/         # Monitoring layer
     ├── logger.rs       # Logging system
     └── performance.rs  # Performance monitoring
@@ -147,6 +149,37 @@ let value = SqlValue::DateTime(chrono::Utc::now()); // DateTime(...)
 // SQL string conversion
 let sql = value.to_sql_string();  // "42", "'hello'", "TRUE"
 ```
+
+### SQL Injection Protection
+
+The `utils::sql_safety` module (re-exported at the crate root) provides defense-in-depth against SQL injection. While **parameterized queries** (`?` / `$1` placeholders) are the first line of defense for values, identifiers (table/column names) are still interpolated directly into SQL. The library automatically validates identifiers in `Query` / `AdvancedQuery` / model CRUD; for custom SQL you can use these utilities directly:
+
+```rust
+use torm::{
+    SqlSanitizer, validate_identifier, quote_identifier,
+    escape_string, contains_injection_pattern,
+};
+
+// 1. Validate / quote identifiers before splicing them into SQL
+assert_eq!(validate_identifier("user_name"), Ok("user_name".to_string()));
+assert!(validate_identifier("name; DROP TABLE users").is_err());
+assert_eq!(quote_identifier("select"), Some("`select`".to_string()));
+
+// SqlSanitizer::identifier returns a safe, splicable string
+// (falls back to "" and warns when the identifier is unsafe)
+let col = SqlSanitizer::identifier("user_name");
+let query = format!("SELECT {} FROM users", col);   // safe
+
+// 2. Escape string literals if you must inline values
+let value = escape_string("O'Reilly");              // "O''Reilly"
+
+// 3. Heuristically audit raw SQL for dangerous patterns
+// (skips string literals & comments to reduce false positives)
+assert!(contains_injection_pattern("1 OR 1=1; DROP TABLE users").is_some());
+assert!(contains_injection_pattern("SELECT * FROM users WHERE id = ?").is_none());
+```
+
+> **Note**: `contains_injection_pattern` is a heuristic audit tool for assisting review — it does **not** replace parameterized queries.
 
 ### Query Builder
 
@@ -347,7 +380,7 @@ cargo test
 - **Connection Abstraction**: DatabaseConnection trait
 - **Transaction System**: Transaction
 - **Connection Pools**: Pool / SimplePool
-- **Utilities**: SimpleUuid, SimpleLruCache, SimpleError
+- **Utilities**: SimpleUuid, SimpleLruCache, SimpleError, SqlSanitizer (SQL injection protection)
 
 ## 📚 Documentation
 

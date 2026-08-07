@@ -41,6 +41,7 @@ pub use utils::simple_pool::{SimplePool, PoolStatus};
 pub use utils::simple_lru::SimpleLruCache;
 pub use utils::simple_error::{SimpleError, SimpleResult};
 pub use utils::simple_uuid::{SimpleUuid, IdGenerator};
+pub use utils::sql_safety::{SqlSanitizer, validate_identifier, quote_identifier, escape_string, contains_injection_pattern};
 
 // Core exports - 监控层
 pub use monitoring::logger::{Logger, LogLevel, LogEntry, ConsoleLogger, FileLogger, CompositeLogger, QueryTracer, LogManager, PerformanceMonitor, PerformanceStats};

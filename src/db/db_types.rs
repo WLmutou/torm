@@ -80,7 +80,7 @@ impl SqlValue {
             SqlValue::String(s) => format!("'{}'", s.replace('\'', "''")),
             SqlValue::Bytes(_) => "BLOB".to_string(),
             SqlValue::DateTime(dt) => format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S")),
-            SqlValue::Json(s) => format!("'{}'", s),
+            SqlValue::Json(s) => format!("'{}'", s.replace('\'', "''")),
         }
     }
 

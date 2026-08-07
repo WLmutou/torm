@@ -3,3 +3,4 @@ pub mod simple_pool;
 pub mod simple_lru;
 pub mod simple_error;
 pub mod simple_uuid;
+pub mod sql_safety;

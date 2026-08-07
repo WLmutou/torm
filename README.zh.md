@@ -18,6 +18,7 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 - ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create_model` / `first_model` / `find_models` / `update_model` / `delete_model`
 - ✅ **事务支持** - 支持事务的创建、提交和回滚
 - ✅ **连接池** - 支持 SQLite/MySQL/PostgreSQL 连接池
+- ✅ **防 SQL 注入** - 标识符校验/引用、字符串转义、危险模式检测（`utils::sql_safety`）
 - ✅ **日志与性能监控** - 内置日志系统和性能统计
 
 ## 📦 依赖
@@ -80,7 +81,8 @@ src/
 │   ├── simple_pool.rs  # 简单连接池
 │   ├── simple_lru.rs   # LRU 缓存
 │   ├── simple_error.rs # 简化错误
-│   └── simple_uuid.rs  # UUID/ID 生成
+│   ├── simple_uuid.rs  # UUID/ID 生成
+│   └── sql_safety.rs   # 防 SQL 注入（标识符、转义、检测）
 └── monitoring/         # 监控层
     ├── logger.rs       # 日志系统
     └── performance.rs  # 性能监控
@@ -147,6 +149,37 @@ let value = SqlValue::DateTime(chrono::Utc::now()); // DateTime(...)
 // SQL 字符串转换
 let sql = value.to_sql_string();  // "42", "'hello'", "TRUE"
 ```
+
+### 防 SQL 注入
+
+`utils::sql_safety` 模块（在 crate 根目录重导出）提供了针对 SQL 注入的纵深防御。**参数化查询**（`?` / `$1` 占位符）是对**值**的第一道防线；但表名、列名等**标识符**仍会被直接拼接到 SQL 中。库已自动在 `Query` / `AdvancedQuery` / 模型 CRUD 中对标识符进行校验；对于自定义 SQL 拼接，可直接使用以下工具：
+
+```rust
+use torm::{
+    SqlSanitizer, validate_identifier, quote_identifier,
+    escape_string, contains_injection_pattern,
+};
+
+// 1. 拼接前先校验 / 引用标识符
+assert_eq!(validate_identifier("user_name"), Ok("user_name".to_string()));
+assert!(validate_identifier("name; DROP TABLE users").is_err());
+assert_eq!(quote_identifier("select"), Some("`select`".to_string()));
+
+// SqlSanitizer::identifier 返回可直接拼接的安全字符串
+// （标识符不安全时回退为 "" 并打印告警）
+let col = SqlSanitizer::identifier("user_name");
+let query = format!("SELECT {} FROM users", col);   // 安全
+
+// 2. 若必须内联值，对字符串字面量进行转义
+let value = escape_string("O'Reilly");              // "O''Reilly"
+
+// 3. 启发式审计原始 SQL 中的危险模式
+// （自动跳过字符串字面量与注释，降低误报）
+assert!(contains_injection_pattern("1 OR 1=1; DROP TABLE users").is_some());
+assert!(contains_injection_pattern("SELECT * FROM users WHERE id = ?").is_none());
+```
+
+> **注意**：`contains_injection_pattern` 是用于辅助审计的启发式工具，**不能替代**参数化查询。
 
 ### 查询构建器
 
@@ -347,7 +380,7 @@ cargo test
 - **连接抽象**: DatabaseConnection trait
 - **事务系统**: Transaction
 - **连接池**: Pool / SimplePool
-- **工具库**: SimpleUuid, SimpleLruCache, SimpleError
+- **工具库**: SimpleUuid, SimpleLruCache, SimpleError, SqlSanitizer（防 SQL 注入）
 
 ## 📚 文档
 
