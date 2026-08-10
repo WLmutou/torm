@@ -2,7 +2,16 @@
 name = "torm-derive"
 version = "0.1.0"
 edition = "2021"
-description = "Derive macros for the TORM library"
+rust-version = "1.70"
+description = "Derive macros for the TORM library (Tokio ORM)"
+license = "MIT"
+authors = ["WLmutou <jun1484528313@163.com>"]
+repository = "https://github.com/WLmutou/torm"
+homepage = "https://github.com/WLmutou/torm"
+documentation = "https://docs.rs/torm-derive"
+readme = "../README.md"
+keywords = ["orm", "derive", "proc-macro", "torm", "database"]
+categories = ["database-implementations", "rust-patterns"]
 
 [lib]
 proc-macro = true
