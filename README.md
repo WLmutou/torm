@@ -405,6 +405,64 @@ cargo run --example integration_example
 cargo test
 ```
 
+## 🔄 Database Migration Tools
+
+TORM ships with four standalone CLI tools (under `src/bin/`) that migrate schema and data **between** databases using the TORM native protocol drivers. Each tool discovers the source tables, translates the schema to the target dialect, and streams data in batches inside per-batch transactions.
+
+| Tool | Direction |
+|------|-----------|
+| `mysql2postgresql` | MySQL → PostgreSQL |
+| `postgresql2mysql` | PostgreSQL → MySQL |
+| `sqlite2postgres` | SQLite → PostgreSQL |
+| `postgres2sqlite` | PostgreSQL → SQLite |
+
+### Build
+
+```bash
+cargo build --release
+```
+
+### Usage
+
+```bash
+# MySQL → PostgreSQL
+./target/release/mysql2postgresql \
+  --mhost 127.0.0.1 --mport 3306 --mdb mydb --muser root --mpass pw \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+
+# PostgreSQL → MySQL
+./target/release/postgresql2mysql \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw \
+  --mhost 127.0.0.1 --mport 3306 --mdb mydb --muser root --mpass pw
+
+# SQLite → PostgreSQL (SQLite file is a positional argument)
+./target/release/sqlite2postgres /path/to/data.db \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+
+# PostgreSQL → SQLite
+./target/release/postgres2sqlite /path/to/output.db \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+```
+
+Running any tool with **no arguments** prints its help.
+
+### Common Options
+
+| Option | Description |
+|--------|-------------|
+| `--tables t1,t2` | Migrate only the specified tables (default: all) |
+| `--batch N` | Rows per batch (default `1000`) |
+| `--create-only` | Create schema only, skip data |
+| `--data-only` | Migrate data only, skip schema |
+
+### Behavioral Notes
+
+- **Schema translation**: MySQL/PostgreSQL types are mapped to the target dialect; auto-increment columns map to `SERIAL`/`BIGSERIAL` (PostgreSQL) or `AUTO_INCREMENT` (MySQL) / `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite). Composite `UNIQUE` constraints are preserved as table-level constraints.
+- **Stable batching**: reads are `ORDER BY` primary key so `LIMIT/OFFSET` pagination never duplicates or drops rows.
+- **JSON & large text**: `json`/`jsonb`/`text`/`varchar` map to `LONGTEXT` (MySQL) / `TEXT` (PostgreSQL / SQLite) to avoid truncation; columns used as keys downgrade to `VARCHAR(255)` where required.
+- **Case sensitivity**: MySQL target tables use the `utf8mb4_bin` collation so `UNIQUE`/primary-key semantics match PostgreSQL (case-sensitive), preventing false duplicates.
+- **Default values**: PostgreSQL function defaults such as `timezone('utc', now())` are normalized to `CURRENT_TIMESTAMP`.
+
 ## 🛠 Tech Stack
 
 ### External Dependencies

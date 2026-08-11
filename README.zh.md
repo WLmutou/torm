@@ -363,6 +363,64 @@ cargo run --example integration_example
 cargo test
 ```
 
+## 🔄 数据库迁移工具
+
+TORM 内置 4 个独立的命令行工具（位于 `src/bin/`），基于 TORM 原生协议驱动，实现**数据库之间的表结构与数据迁移**。每个工具会自动发现源库的表、把表结构翻译为目标方言，并分批（每批一个事务）流式迁移数据。
+
+| 工具 | 方向 |
+|------|------|
+| `mysql2postgresql` | MySQL → PostgreSQL |
+| `postgresql2mysql` | PostgreSQL → MySQL |
+| `sqlite2postgres` | SQLite → PostgreSQL |
+| `postgres2sqlite` | PostgreSQL → SQLite |
+
+### 构建
+
+```bash
+cargo build --release
+```
+
+### 用法
+
+```bash
+# MySQL → PostgreSQL
+./target/release/mysql2postgresql \
+  --mhost 127.0.0.1 --mport 3306 --mdb mydb --muser root --mpass pw \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+
+# PostgreSQL → MySQL
+./target/release/postgresql2mysql \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw \
+  --mhost 127.0.0.1 --mport 3306 --mdb mydb --muser root --mpass pw
+
+# SQLite → PostgreSQL（SQLite 文件为位置参数）
+./target/release/sqlite2postgres /path/to/data.db \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+
+# PostgreSQL → SQLite
+./target/release/postgres2sqlite /path/to/output.db \
+  --phost 127.0.0.1 --pport 5432 --pdb mydb --puser postgres --ppass pw
+```
+
+不带任何参数运行时，工具会打印帮助信息。
+
+### 通用参数
+
+| 参数 | 说明 |
+|------|------|
+| `--tables t1,t2` | 只迁移指定表（默认全部） |
+| `--batch N` | 每批迁移行数（默认 `1000`） |
+| `--create-only` | 只建表不迁数据 |
+| `--data-only` | 只迁数据跳过建表 |
+
+### 行为说明
+
+- **表结构翻译**：MySQL/PostgreSQL 类型映射为目标方言；自增列映射为 PostgreSQL 的 `SERIAL`/`BIGSERIAL`、MySQL 的 `AUTO_INCREMENT`、SQLite 的 `INTEGER PRIMARY KEY AUTOINCREMENT`。复合 `UNIQUE` 约束保留为表级约束。
+- **稳定分批**：读取按主键 `ORDER BY`，保证 `LIMIT/OFFSET` 分页不重复、不遗漏。
+- **JSON 与大文本**：`json`/`jsonb`/`text`/`varchar` 映射为 MySQL 的 `LONGTEXT`（PostgreSQL / SQLite 为 `TEXT`）以避免截断；作为 key 的列按需降级为 `VARCHAR(255)`。
+- **大小写敏感**：MySQL 目标表使用 `utf8mb4_bin` 排序规则，使 `UNIQUE`/主键语义与 PostgreSQL 一致（区分大小写），避免误判仅大小写不同的值为重复。
+- **默认值**：PostgreSQL 的函数式默认值（如 `timezone('utc', now())`）会归一化为 `CURRENT_TIMESTAMP`。
+
 ## 🛠 技术栈
 
 ### 外部依赖
