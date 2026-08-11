@@ -616,6 +616,9 @@ async fn com_query(
 }
 
 /// Prepared-statement path: `COM_STMT_PREPARE` then `COM_STMT_EXECUTE` (binary protocol).
+///
+/// 每次执行后发送 `COM_STMT_CLOSE` 释放服务器端的 prepared statement，避免
+/// 持续累积直至超过 MySQL 的 `max_prepared_stmt_count` 上限。
 async fn com_stmt_execute_query(
     stream: &mut TcpStream,
     sql: &str,
@@ -627,7 +630,19 @@ async fn com_stmt_execute_query(
         .iter()
         .map(|p| sql_value_to_mysql_type(p))
         .collect::<Vec<_>>();
-    com_stmt_execute(stream, stmt_id, &column_types, params, capabilities).await
+    let result = com_stmt_execute(stream, stmt_id, &column_types, params, capabilities).await;
+    // 无论执行成功与否都关闭语句，防止 prepared statement 泄漏。
+    let _ = com_stmt_close(stream, stmt_id).await;
+    result
+}
+
+/// `COM_STMT_CLOSE` — 关闭一个 prepared statement，释放服务器端资源（单向，无响应）。
+async fn com_stmt_close(stream: &mut TcpStream, stmt_id: u32) -> Result<(), DbError> {
+    let mut payload = Vec::with_capacity(5);
+    payload.push(0x19); // COM_STMT_CLOSE
+    payload.extend_from_slice(&stmt_id.to_le_bytes());
+    write_packet(stream, 0, &payload).await?;
+    Ok(())
 }
 
 /// `COM_STMT_PREPARE` — send the SQL, return the statement id and the number of

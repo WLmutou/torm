@@ -193,13 +193,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     sqlite.ping().await?;
     println!("  ✅ SQLite 连接成功 ({})", sqlite.db_type());
 
+    // 获取实际 schema（PostgreSQL 的 schema 名 ≠ 数据库名，通常是 public）
+    let schema = resolve_schema(&pg).await?;
+    println!("  PostgreSQL schema: {}", schema);
+
     // 获取需要迁移的表
-    let tables = resolve_tables(&pg, &cfg).await?;
+    let tables = resolve_tables(&pg, &cfg, &schema).await?;
     println!("\n待迁移表 ({}): {:?}\n", tables.len(), tables);
 
     for table in &tables {
         // 1. 读取 PostgreSQL 表结构
-        let columns = fetch_columns(&pg, &cfg.p_db, table).await?;
+        let (columns, unique_groups) = fetch_columns(&pg, &schema, table).await?;
         if columns.is_empty() {
             eprintln!("  ⚠️  表 {} 无列定义，跳过", table);
             continue;
@@ -207,7 +211,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // 2. 建表（除非只迁移数据）
         if !cfg.data_only {
-            match create_sqlite_table(&sqlite, table, &columns).await {
+            match create_sqlite_table(&sqlite, table, &columns, &unique_groups).await {
                 Ok(_) => println!("  ✅ 已创建表结构: {}", table),
                 Err(e) => {
                     eprintln!("  ❌ 建表失败 {}: {}", table, e);
@@ -231,18 +235,37 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
+// 获取当前连接的 PostgreSQL schema 名（默认通常是 public）
+// ---------------------------------------------------------------------------
+async fn resolve_schema(pg: &Database) -> std::result::Result<String, DbError> {
+    let result = pg.query("SELECT current_schema() AS schema", &[]).await?;
+    if let Some(row) = result.rows.first() {
+        if let Some(SqlValue::String(s)) = row.get("schema") {
+            if !s.is_empty() {
+                return Ok(s.to_string());
+            }
+        }
+    }
+    // 兜底使用 public
+    Ok("public".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // 获取需要迁移的表清单
 // ---------------------------------------------------------------------------
-async fn resolve_tables(pg: &Database, cfg: &Config) -> std::result::Result<Vec<String>, DbError> {
+async fn resolve_tables(pg: &Database, cfg: &Config, schema: &str) -> std::result::Result<Vec<String>, DbError> {
     if let Some(tables) = &cfg.tables {
         return Ok(tables.clone());
     }
-    // 查询 PostgreSQL 当前 schema 下所有普通表
-    let sql = "SELECT tablename AS table_name \
-               FROM pg_tables \
-               WHERE schemaname = 'public' \
-               ORDER BY tablename";
-    let result = pg.query(sql, &[]).await?;
+    // 查询 PostgreSQL 指定 schema 下所有普通表
+    let sql = format!(
+        "SELECT tablename AS table_name \
+         FROM pg_tables \
+         WHERE schemaname = '{}' \
+         ORDER BY tablename",
+        schema
+    );
+    let result = pg.query(&sql, &[]).await?;
     let mut tables = Vec::new();
     for row in &result.rows {
         if let Some(SqlValue::String(name)) = row.get("table_name") {
@@ -259,7 +282,7 @@ async fn fetch_columns(
     pg: &Database,
     db_name: &str,
     table: &str,
-) -> std::result::Result<Vec<PgColumn>, DbError> {
+) -> std::result::Result<(Vec<PgColumn>, Vec<Vec<String>>), DbError> {
     let sql = format!(
         "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, c.column_default \
          FROM information_schema.columns c \
@@ -301,8 +324,10 @@ async fn fetch_columns(
          JOIN information_schema.key_column_usage kcu \
            ON tc.constraint_name = kcu.constraint_name \
           AND tc.table_schema = kcu.table_schema \
+          AND tc.table_name = kcu.table_name \
          WHERE tc.constraint_type = 'PRIMARY KEY' \
-           AND tc.table_schema = '{}' AND tc.table_name = '{}'",
+           AND tc.table_schema = '{}' AND tc.table_name = '{}' \
+         ORDER BY kcu.ordinal_position",
         db_name, table
     );
     let pk_result = pg.query(&pk_sql, &[]).await?;
@@ -315,28 +340,63 @@ async fn fetch_columns(
         col.is_primary = pk_names.contains(&col.name);
     }
 
-    // 唯一约束（非主键）
+    // 唯一约束（非主键）：按约束名分组，区分单列唯一与复合唯一
+    //  - 单列唯一约束 → 该列加列级 UNIQUE
+    //  - 复合唯一约束 → 生成表级 UNIQUE(col1, col2, ...)
     let uq_sql = format!(
-        "SELECT kcu.column_name \
+        "SELECT tc.constraint_name, kcu.column_name \
          FROM information_schema.table_constraints tc \
          JOIN information_schema.key_column_usage kcu \
            ON tc.constraint_name = kcu.constraint_name \
           AND tc.table_schema = kcu.table_schema \
+          AND tc.table_name = kcu.table_name \
          WHERE tc.constraint_type = 'UNIQUE' \
-           AND tc.table_schema = '{}' AND tc.table_name = '{}'",
+           AND tc.table_schema = '{}' AND tc.table_name = '{}' \
+         ORDER BY tc.constraint_name, kcu.ordinal_position",
         db_name, table
     );
     let uq_result = pg.query(&uq_sql, &[]).await?;
-    let uq_names: Vec<String> = uq_result
-        .rows
-        .iter()
-        .filter_map(|row| row.get("column_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect();
-    for col in &mut columns {
-        col.is_unique = !col.is_primary && uq_names.contains(&col.name);
+
+    // 按 constraint_name 分组
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut cur_name: Option<String> = None;
+    let mut cur_cols: Vec<String> = Vec::new();
+    for row in &uq_result.rows {
+        let cname = row
+            .get("constraint_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let col = row
+            .get("column_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if cur_name.is_some() && cur_name.as_deref() != cname.as_deref() {
+            groups.push(std::mem::take(&mut cur_cols));
+        }
+        cur_name = cname;
+        cur_cols.push(col);
+    }
+    if !cur_cols.is_empty() {
+        groups.push(cur_cols);
     }
 
-    Ok(columns)
+    let mut unique_groups: Vec<Vec<String>> = Vec::new();
+    for g in groups {
+        if g.len() == 1 {
+            // 单列唯一 → 列级 UNIQUE
+            for col in &mut columns {
+                if !col.is_primary && col.name == g[0] {
+                    col.is_unique = true;
+                }
+            }
+        } else {
+            // 复合唯一 → 表级约束
+            unique_groups.push(g);
+        }
+    }
+
+    Ok((columns, unique_groups))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +406,7 @@ async fn create_sqlite_table(
     sqlite: &Database,
     table: &str,
     columns: &[PgColumn],
+    unique_groups: &[Vec<String>],
 ) -> std::result::Result<(), DbError> {
     // 先清理旧表，保证可重复执行（若需保留请去掉 DROP）
     let _ = sqlite.execute(&format!("DROP TABLE IF EXISTS \"{}\"", table), &[]).await;
@@ -387,6 +448,14 @@ async fn create_sqlite_table(
         defs.push(format!("  PRIMARY KEY ({})", primary_keys.join(", ")));
     }
 
+    // 复合唯一约束 → 表级 UNIQUE (col1, col2, ...)
+    for group in unique_groups {
+        if group.len() > 1 {
+            let cols: Vec<String> = group.iter().map(|c| format!("\"{}\"", c)).collect();
+            defs.push(format!("  UNIQUE ({})", cols.join(", ")));
+        }
+    }
+
     let sql = format!("CREATE TABLE IF NOT EXISTS \"{}\" (\n{}\n)", table, defs.join(",\n"));
     sqlite.execute(&sql, &[]).await?;
     Ok(())
@@ -414,7 +483,20 @@ async fn migrate_table(
 
     // PostgreSQL 源列名（双引号包裹，兼容大写/关键字）
     let pg_cols: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
-    let select_sql = format!("SELECT {} FROM \"{}\"", pg_cols.join(", "), table);
+    // 必须加 ORDER BY 保证 LIMIT/OFFSET 分批读取的行序稳定，
+    // 否则 PostgreSQL 无排序时跨批次可能读到重复行，导致主键/唯一约束冲突。
+    // 优先按主键排序；无主键时按全部列排序，保证确定性。
+    let order_by: String = if let Some(pk) = columns.iter().find(|c| c.is_primary) {
+        format!("\"{}\"", pk.name)
+    } else {
+        pg_cols.join(", ")
+    };
+    let select_sql = format!(
+        "SELECT {} FROM \"{}\" ORDER BY {}",
+        pg_cols.join(", "),
+        table,
+        order_by
+    );
 
     let mut offset: i64 = 0;
     let mut total: u64 = 0;

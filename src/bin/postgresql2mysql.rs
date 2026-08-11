@@ -196,13 +196,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     mysql.ping().await?;
     println!("  ✅ MySQL 连接成功 ({})", mysql.db_type());
 
+    // 获取实际 schema（PostgreSQL 的 schema 名 ≠ 数据库名，通常是 public）
+    let schema = resolve_schema(&pg).await?;
+    println!("  PostgreSQL schema: {}", schema);
+
     // 获取需要迁移的表
-    let tables = resolve_tables(&pg, &cfg).await?;
+    let tables = resolve_tables(&pg, &cfg, &schema).await?;
     println!("\n待迁移表 ({}): {:?}\n", tables.len(), tables);
 
     for table in &tables {
         // 1. 读取 PostgreSQL 表结构
-        let columns = fetch_columns(&pg, &cfg.p_db, table).await?;
+        let (columns, unique_groups) = fetch_columns(&pg, &schema, table).await?;
         if columns.is_empty() {
             eprintln!("  ⚠️  表 {} 无列定义，跳过", table);
             continue;
@@ -210,7 +214,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // 2. 建表（除非只迁移数据）
         if !cfg.data_only {
-            match create_mysql_table(&mysql, table, &columns).await {
+            match create_mysql_table(&mysql, table, &columns, &unique_groups).await {
                 Ok(_) => println!("  ✅ 已创建表结构: {}", table),
                 Err(e) => {
                     eprintln!("  ❌ 建表失败 {}: {}", table, e);
@@ -234,18 +238,35 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
+// 获取当前连接的 PostgreSQL schema 名（默认通常是 public）
+// ---------------------------------------------------------------------------
+async fn resolve_schema(pg: &Database) -> std::result::Result<String, DbError> {
+    let result = pg.query("SELECT current_schema() AS schema", &[]).await?;
+    if let Some(row) = result.rows.first() {
+        if let Some(SqlValue::String(s)) = row.get("schema") {
+            if !s.is_empty() {
+                return Ok(s.to_string());
+            }
+        }
+    }
+    // 兜底使用 public
+    Ok("public".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // 获取需要迁移的表清单
 // ---------------------------------------------------------------------------
-async fn resolve_tables(pg: &Database, cfg: &Config) -> std::result::Result<Vec<String>, DbError> {
+async fn resolve_tables(pg: &Database, cfg: &Config, schema: &str) -> std::result::Result<Vec<String>, DbError> {
     if let Some(tables) = &cfg.tables {
         return Ok(tables.clone());
     }
-    // 查询 PostgreSQL 当前 schema 下所有普通表
+    // 查询 PostgreSQL 指定 schema 下所有普通表
     let sql = format!(
         "SELECT tablename AS table_name \
          FROM pg_tables \
-         WHERE schemaname = 'public' \
-         ORDER BY tablename"
+         WHERE schemaname = '{}' \
+         ORDER BY tablename",
+        schema
     );
     let result = pg.query(&sql, &[]).await?;
     let mut tables = Vec::new();
@@ -264,7 +285,7 @@ async fn fetch_columns(
     pg: &Database,
     db_name: &str,
     table: &str,
-) -> std::result::Result<Vec<PgColumn>, DbError> {
+) -> std::result::Result<(Vec<PgColumn>, Vec<Vec<String>>), DbError> {
     // 从 information_schema 读列定义
     let sql = format!(
         "SELECT c.column_name, c.data_type, c.udt_name, c.is_nullable, c.column_default \
@@ -307,8 +328,10 @@ async fn fetch_columns(
          JOIN information_schema.key_column_usage kcu \
            ON tc.constraint_name = kcu.constraint_name \
           AND tc.table_schema = kcu.table_schema \
+          AND tc.table_name = kcu.table_name \
          WHERE tc.constraint_type = 'PRIMARY KEY' \
-           AND tc.table_schema = '{}' AND tc.table_name = '{}'",
+           AND tc.table_schema = '{}' AND tc.table_name = '{}' \
+         ORDER BY kcu.ordinal_position",
         db_name, table
     );
     let pk_result = pg.query(&pk_sql, &[]).await?;
@@ -321,28 +344,63 @@ async fn fetch_columns(
         col.is_primary = pk_names.contains(&col.name);
     }
 
-    // 唯一约束（非主键）
+    // 唯一约束（非主键）：按约束名分组，区分单列唯一与复合唯一
+    //  - 单列唯一约束 → 该列加列级 UNIQUE
+    //  - 复合唯一约束 → 生成表级 UNIQUE(col1, col2, ...)
     let uq_sql = format!(
-        "SELECT kcu.column_name \
+        "SELECT tc.constraint_name, kcu.column_name \
          FROM information_schema.table_constraints tc \
          JOIN information_schema.key_column_usage kcu \
            ON tc.constraint_name = kcu.constraint_name \
           AND tc.table_schema = kcu.table_schema \
+          AND tc.table_name = kcu.table_name \
          WHERE tc.constraint_type = 'UNIQUE' \
-           AND tc.table_schema = '{}' AND tc.table_name = '{}'",
+           AND tc.table_schema = '{}' AND tc.table_name = '{}' \
+         ORDER BY tc.constraint_name, kcu.ordinal_position",
         db_name, table
     );
     let uq_result = pg.query(&uq_sql, &[]).await?;
-    let uq_names: Vec<String> = uq_result
-        .rows
-        .iter()
-        .filter_map(|row| row.get("column_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .collect();
-    for col in &mut columns {
-        col.is_unique = !col.is_primary && uq_names.contains(&col.name);
+
+    // 按 constraint_name 分组
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut cur_name: Option<String> = None;
+    let mut cur_cols: Vec<String> = Vec::new();
+    for row in &uq_result.rows {
+        let cname = row
+            .get("constraint_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let col = row
+            .get("column_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if cur_name.is_some() && cur_name.as_deref() != cname.as_deref() {
+            groups.push(std::mem::take(&mut cur_cols));
+        }
+        cur_name = cname;
+        cur_cols.push(col);
+    }
+    if !cur_cols.is_empty() {
+        groups.push(cur_cols);
     }
 
-    Ok(columns)
+    let mut unique_groups: Vec<Vec<String>> = Vec::new();
+    for g in groups {
+        if g.len() == 1 {
+            // 单列唯一 → 列级 UNIQUE
+            for col in &mut columns {
+                if !col.is_primary && col.name == g[0] {
+                    col.is_unique = true;
+                }
+            }
+        } else {
+            // 复合唯一 → 表级约束
+            unique_groups.push(g);
+        }
+    }
+
+    Ok((columns, unique_groups))
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +410,7 @@ async fn create_mysql_table(
     mysql: &Database,
     table: &str,
     columns: &[PgColumn],
+    unique_groups: &[Vec<String>],
 ) -> std::result::Result<(), DbError> {
     // 先清理旧表，保证可重复执行（若需保留请去掉 DROP）
     let _ = mysql.execute(&format!("DROP TABLE IF EXISTS `{}`", table), &[]).await;
@@ -359,8 +418,24 @@ async fn create_mysql_table(
     let mut defs: Vec<String> = Vec::new();
     let mut primary_keys: Vec<String> = Vec::new();
 
+    // 收集所有参与 key 的列（主键 + 单列唯一 + 复合唯一组中的列），
+    // 这些列若是 TEXT/BLOB/JSON 类型，MySQL 不允许作为 key，需替换为 VARCHAR。
+    let mut key_cols: HashSet<String> = HashSet::new();
     for col in columns {
-        let mut def = format!("  `{}` {}", col.name, pg_type_to_mysql(&col.data_type, &col.udt_name));
+        if col.is_primary || col.is_unique {
+            key_cols.insert(col.name.clone());
+        }
+    }
+    for group in unique_groups {
+        for c in group {
+            key_cols.insert(c.clone());
+        }
+    }
+
+    for col in columns {
+        let is_key = key_cols.contains(&col.name);
+        let col_type = mysql_type_for_col(col, is_key);
+        let mut def = format!("  `{}` {}", col.name, col_type);
         if col.is_auto_increment() {
             def.push_str(" AUTO_INCREMENT");
         }
@@ -385,9 +460,20 @@ async fn create_mysql_table(
         defs.push(format!("  PRIMARY KEY ({})", primary_keys.join(", ")));
     }
 
-    // MySQL 默认使用 utf8mb4 + InnoDB
+    // 复合唯一约束 → 表级 UNIQUE (col1, col2, ...)
+    for group in unique_groups {
+        if group.len() > 1 {
+            let cols: Vec<String> = group.iter().map(|c| format!("`{}`", c)).collect();
+            defs.push(format!("  UNIQUE ({})", cols.join(", ")));
+        }
+    }
+
+    // MySQL 使用 utf8mb4 + InnoDB；表级 collation 用 utf8mb4_bin（区分大小写），
+    // 使 UNIQUE/主键索引的行为与 PostgreSQL 一致。
+    // PostgreSQL 的 UNIQUE 区分大小写，而 MySQL 默认 collation（如 utf8mb4_general_ci）
+    // 不区分大小写，会导致仅大小写不同的值（如 'RuTSi4Mo' vs 'RuTsi4Mo'）被误判为重复。
     let sql = format!(
-        "CREATE TABLE IF NOT EXISTS `{}` (\n{}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        "CREATE TABLE IF NOT EXISTS `{}` (\n{}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
         table,
         defs.join(",\n")
     );
@@ -417,7 +503,19 @@ async fn migrate_table(
 
     // PostgreSQL 列名（双引号包裹，兼容大写/关键字）
     let pg_cols: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
-    let select_sql = format!("SELECT {} FROM \"{}\"", pg_cols.join(", "), table);
+    // 必须加 ORDER BY 保证 LIMIT/OFFSET 分批读取的行序稳定，
+    // 否则 PostgreSQL 无排序时跨批次可能读到重复行，导致主键/唯一约束冲突。
+    let order_by: String = if let Some(pk) = columns.iter().find(|c| c.is_primary) {
+        format!("\"{}\"", pk.name)
+    } else {
+        pg_cols.join(", ")
+    };
+    let select_sql = format!(
+        "SELECT {} FROM \"{}\" ORDER BY {}",
+        pg_cols.join(", "),
+        table,
+        order_by
+    );
 
     let mut offset: i64 = 0;
     let mut total: u64 = 0;
@@ -450,6 +548,21 @@ async fn migrate_table(
 }
 
 // ---------------------------------------------------------------------------
+// 确定 MySQL 列类型：作为主键/唯一键的列不能用 TEXT/LONGTEXT（MySQL 不允许
+// TEXT/BLOB 列作为 key），需替换为 VARCHAR；其余列用类型映射结果。
+// ---------------------------------------------------------------------------
+fn mysql_type_for_col(col: &PgColumn, is_key: bool) -> String {
+    let base = pg_type_to_mysql(&col.data_type, &col.udt_name);
+    let upper = base.to_ascii_uppercase();
+    if is_key && (upper.contains("TEXT") || upper.contains("BLOB") || upper.contains("JSON")) {
+        // key 列用 VARCHAR，Odoo 中作为 key 的 translate/jsonb 字段通常是短文本
+        "VARCHAR(255)".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PostgreSQL 类型 → MySQL 类型
 // ---------------------------------------------------------------------------
 fn pg_type_to_mysql(data_type: &str, udt_name: &str) -> &'static str {
@@ -470,9 +583,13 @@ fn pg_type_to_mysql(data_type: &str, udt_name: &str) -> &'static str {
         // 布尔
         ("boolean", "bool") => "TINYINT(1)",
         // 字符
-        ("character varying", "varchar") => "VARCHAR(255)",
+        // PostgreSQL 的 character varying 不限长度，映射成 MySQL VARCHAR(255) 会
+        // 截断超长数据报 "Data too long"；统一用 LONGTEXT（key 列由 mysql_type_for_col
+        // 降级为 VARCHAR(255)）。
+        ("character varying", "varchar") => "LONGTEXT",
         ("character", "bpchar") => "CHAR(1)",
-        ("text", "text") => "TEXT",
+        // text 系列用 LONGTEXT，避免大文本超过 TEXT(64KB) 上限报 "Data too long"
+        ("text", "text") => "LONGTEXT",
         ("name", "name") => "VARCHAR(64)",
         ("citext", "citext") => "VARCHAR(255)",
         // 二进制
@@ -486,8 +603,12 @@ fn pg_type_to_mysql(data_type: &str, udt_name: &str) -> &'static str {
         ("time without time zone", "time") => "TIME",
         ("time with time zone", "timetz") => "TIME",
         // 其他
-        ("json", "json") => "JSON",
-        ("jsonb", "jsonb") => "JSON",
+        // json/jsonb → LONGTEXT（不用 MySQL JSON 类型）：
+        //   1. MySQL JSON 列不能作为主键/唯一键，会报 "JSON column cannot be used in key"
+        //   2. MySQL JSON 对数据格式要求严格，迁移时易报 "Data too long" 或格式错误
+        // 用 LONGTEXT 存 JSON 字符串，可容纳任意长度且不限制 key 约束。
+        ("json", "json") => "LONGTEXT",
+        ("jsonb", "jsonb") => "LONGTEXT",
         ("uuid", "uuid") => "CHAR(36)",
         ("inet", "inet") => "VARCHAR(45)",
         ("macaddr", "macaddr") => "VARCHAR(17)",
@@ -495,7 +616,7 @@ fn pg_type_to_mysql(data_type: &str, udt_name: &str) -> &'static str {
         ("smallserial", "int2") => "SMALLINT",
         ("serial", "int4") => "INT",
         ("bigserial", "int8") => "BIGINT",
-        ("array", _) => "JSON",
+        ("array", _) => "LONGTEXT",
         _ => "TEXT", // 兜底
     }
 }
@@ -515,7 +636,14 @@ fn normalize_default(default: &Option<String>) -> Option<String> {
         return None;
     }
     // 函数类默认值
-    if lower == "now()" || lower == "current_timestamp" || lower == "current_timestamp()" {
+    // timezone('utc'::text, now()) 这类默认值也视为当前时间戳，避免原样拼入
+    // CREATE TABLE 导致 MySQL 语法错误。
+    if lower == "now()"
+        || lower == "current_timestamp"
+        || lower == "current_timestamp()"
+        || lower.contains("timezone('utc'")
+        || (lower.contains("timezone(") && lower.contains("now()"))
+    {
         return Some("CURRENT_TIMESTAMP".to_string());
     }
     if lower == "current_date" || lower == "current_date()" {

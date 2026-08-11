@@ -349,7 +349,15 @@ async fn migrate_table(
         placeholders.join(", ")
     );
 
-    let select_sql = format!("SELECT {} FROM `{}`", cols_sqlite(columns), table);
+    let sqlite_cols = cols_sqlite(columns);
+    // 必须加 ORDER BY 保证 LIMIT/OFFSET 分批读取的行序稳定，
+    // 否则 SQLite 无排序时跨批次可能读到重复行，导致主键/唯一约束冲突。
+    let order_by: String = if let Some(pk) = columns.iter().find(|c| c.is_pk) {
+        format!("`{}`", pk.name)
+    } else {
+        sqlite_cols.clone()
+    };
+    let select_sql = format!("SELECT {} FROM `{}` ORDER BY {}", sqlite_cols, table, order_by);
 
     let mut offset: i64 = 0;
     let mut total: u64 = 0;

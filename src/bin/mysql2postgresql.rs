@@ -301,10 +301,19 @@ async fn create_pg_table(
     let mut primary_keys: Vec<String> = Vec::new();
 
     for col in columns {
-        let mut def = format!("  \"{}\" {}", col.name, mysql_type_to_pg(&col.data_type));
-        if col.is_auto_increment() {
-            def.push_str(" SERIAL");
-        }
+        // 自增列用 SERIAL / BIGSERIAL 作为完整类型（SERIAL 本身即 INTEGER + 序列），
+        // 不能写成 "INTEGER SERIAL"，否则 PostgreSQL 报 syntax error。
+        let mut def = if col.is_auto_increment() {
+            let serial = if col.data_type.to_ascii_lowercase().contains("bigint") {
+                "BIGSERIAL"
+            } else {
+                "SERIAL"
+            };
+            format!("  \"{}\" {}", col.name, serial)
+        } else {
+            format!("  \"{}\" {}", col.name, mysql_type_to_pg(&col.data_type))
+        };
+
         if !col.is_nullable {
             def.push_str(" NOT NULL");
         }
@@ -351,7 +360,15 @@ async fn migrate_table(
         placeholders.join(", ")
     );
 
-    let select_sql = format!("SELECT {} FROM `{}`", cols_mysql(columns), table);
+    let mysql_cols = cols_mysql(columns);
+    // 必须加 ORDER BY 保证 LIMIT/OFFSET 分批读取的行序稳定，
+    // 否则 MySQL 无排序时跨批次可能读到重复行，导致主键/唯一约束冲突。
+    let order_by: String = if let Some(pk) = columns.iter().find(|c| c.is_primary()) {
+        format!("`{}`", pk.name)
+    } else {
+        mysql_cols.clone()
+    };
+    let select_sql = format!("SELECT {} FROM `{}` ORDER BY {}", mysql_cols, table, order_by);
 
     let mut offset: i64 = 0;
     let mut total: u64 = 0;
