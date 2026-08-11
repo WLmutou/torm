@@ -372,7 +372,7 @@ async fn derive_model_end_to_end_sqlite() {
         deleted_at: None,
         tags: None,
     };
-    db.create_model(&mut p).await.unwrap();
+    db.create(&mut p).await.unwrap();
     assert!(p.id > 0, "auto-increment id should be set");
     assert!(p.created_at.is_some(), "created_at set by before_create hook");
 
@@ -388,7 +388,7 @@ async fn derive_model_end_to_end_sqlite() {
 
     // Update via ORM.
     let mut found = found;
-    db.update_model(&mut found, &[("age", SqlValue::I32(31))])
+    db.update(&mut found, &[("age", SqlValue::I32(31))])
         .await
         .unwrap();
     assert!(found.updated_at.is_some(), "updated_at set by before_update hook");
@@ -406,7 +406,7 @@ async fn derive_model_end_to_end_sqlite() {
         deleted_at: None,
         tags: None,
     };
-    db.delete_model(&mut to_delete).await.unwrap();
+    db.delete(&mut to_delete).await.unwrap();
     let gone: Option<Person> = db.first_model(&p.id.to_string()).await.unwrap();
     assert!(gone.is_none());
 }

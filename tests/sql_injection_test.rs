@@ -293,7 +293,7 @@ async fn model_crud_survives_injection_payload_in_value() {
     // 在值中注入 payload：应作为参数安全写入，而不是破坏 SQL
     let evil = "Alice'; DROP TABLE accounts; --";
     let mut account = Account::new(evil);
-    db.create_model(&mut account).await.unwrap();
+    db.create(&mut account).await.unwrap();
 
     // 表仍然存在，且能按主键精确查出该记录
     let found: Option<Account> = db.first_model(&account.id).await.unwrap();
@@ -316,18 +316,18 @@ async fn model_update_delete_survive_injection_payload_in_value() {
     .unwrap();
 
     let mut account = Account::new("safe");
-    db.create_model(&mut account).await.unwrap();
+    db.create(&mut account).await.unwrap();
 
     // UPDATE 值包含注入 payload
     let evil = "malicious' OR '1'='1";
-    db.update_model(&mut account, &[("name", SqlValue::String(evil.to_string()))])
+    db.update(&mut account, &[("name", SqlValue::String(evil.to_string()))])
         .await
         .unwrap();
     let updated: Account = db.first_model(&account.id).await.unwrap().unwrap();
     assert_eq!(updated.name, evil);
 
     // DELETE 安全执行
-    let affected = db.delete_model(&mut account).await.unwrap();
+    let affected = db.delete(&mut account).await.unwrap();
     assert_eq!(affected, 1);
     assert!(db.first_model::<Account>(&account.id).await.unwrap().is_none());
 }
@@ -344,7 +344,7 @@ async fn injection_payload_in_where_value_does_not_match_other_rows() {
 
     for name in ["alice", "bob", "charlie"] {
         let mut a = Account::new(name);
-        db.create_model(&mut a).await.unwrap();
+        db.create(&mut a).await.unwrap();
     }
 
     // 恶意 WHERE 值：参数化后应匹配 0 行，而不是利用 OR 1=1 命中全部

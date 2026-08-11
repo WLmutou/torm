@@ -15,7 +15,7 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **Advanced Queries** - JOIN, GROUP BY, HAVING, aggregate functions
 - ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
 - ✅ **`#[derive(Model)]` Macro** - Generate the `Model` impl from a plain struct, eliminating boilerplate
-- ✅ **GORM-style Model CRUD** - `create_model` / `first_model` / `find_models` / `update_model` / `delete_model` on `Database`
+- ✅ **GORM-style Model CRUD** - `create` / `first_model` / `find_models` / `update` / `delete` on `Database`
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
 - ✅ **SQL Injection Protection** - Identifier validation/quotation, string escaping, and dangerous-pattern detection (`utils::sql_safety`)

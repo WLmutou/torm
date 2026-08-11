@@ -15,7 +15,7 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 - ✅ **高级查询** - JOIN、GROUP BY、HAVING、聚合函数
 - ✅ **模型 Trait** - 自动管理创建时间、更新时间等时间戳
 - ✅ **`#[derive(Model)]` 宏** - 从普通结构体自动生成 `Model` 实现，消除样板代码
-- ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create_model` / `first_model` / `find_models` / `update_model` / `delete_model`
+- ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create` / `first_model` / `find_models` / `update` / `delete`
 - ✅ **事务支持** - 支持事务的创建、提交和回滚
 - ✅ **连接池** - 支持 SQLite/MySQL/PostgreSQL 连接池
 - ✅ **防 SQL 注入** - 标识符校验/引用、字符串转义、危险模式检测（`utils::sql_safety`）

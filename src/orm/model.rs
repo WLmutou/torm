@@ -104,7 +104,7 @@ pub trait Model: Send + Sync {
     }
 
     /// Persistable column/value pairs (excluding the primary key).
-    /// Used by `Database::create_model` to build the INSERT statement.
+    /// Used by `Database::create` to build the INSERT statement.
     fn columns(&self) -> Vec<(&'static str, SqlValue)> {
         Vec::new()
     }

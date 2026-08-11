@@ -3,7 +3,7 @@ members = [".", "torm-derive"]
 
 [package]
 name = "torm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.70"
 description = "A Tokio-based async ORM for Rust with GORM-like API, supporting SQLite, MySQL and PostgreSQL via native wire protocols"

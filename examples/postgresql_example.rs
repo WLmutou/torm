@@ -135,7 +135,7 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
 
     // Create — GORM `db.Create(&user)` equivalent
     let mut alice = User::new("Alice", "alice@example.com").with_age(25);
-    db.create_model(&mut alice).await?;
+    db.create(&mut alice).await?;
     println!(
         "  ✅ Created: id={} name={} (created_at: {:?})",
         alice.id,
@@ -144,7 +144,7 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
     );
 
     let mut bob = User::new("Bob", "bob@example.com").with_age(30);
-    db.create_model(&mut bob).await?;
+    db.create(&mut bob).await?;
     println!("  ✅ Created: id={} name={}", bob.id, bob.name);
 
     // First — GORM `db.First(&user, id)` equivalent
@@ -168,13 +168,13 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
     }
 
     // Update — GORM `db.Model(&user).Update("age", 29)` equivalent
-    db.update_model(&mut alice, &[("age", SqlValue::I32(29))])
+    db.update(&mut alice, &[("age", SqlValue::I32(29))])
         .await?;
     let updated: User = db.first_model(&alice.id).await?.expect("alice exists");
     println!("  ✅ Updated: {} age now {:?}", updated.name, updated.age);
 
     // Delete — GORM `db.Delete(&user)` equivalent
-    db.delete_model(&mut alice).await?;
+    db.delete(&mut alice).await?;
     let gone: Option<User> = db.first_model(&alice.id).await?;
     println!(
         "  ✅ Deleted: {} exists after delete = {}",

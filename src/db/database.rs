@@ -334,7 +334,7 @@ impl Database {
     /// Builds the INSERT from `Model::columns()` plus `created_at`/`updated_at`
     /// (set by the `before_create` hook; the table must include those columns).
     /// Automatically retrieves the auto-generated primary key and sets it via `model.set_id()`.
-    pub async fn create_model<M: Model>(&self, model: &mut M) -> Result<(), DbError> {
+    pub async fn create<M: Model>(&self, model: &mut M) -> Result<(), DbError> {
         model.before_create()?;
 
         let had_id = model.id().is_some();
@@ -458,7 +458,7 @@ impl Database {
 
     /// GORM-style update: UPDATE the given columns of the model, matched by primary key.
     /// Runs the `before_update`/`after_update` hooks and refreshes `updated_at`.
-    pub async fn update_model<M: Model>(
+    pub async fn update<M: Model>(
         &self,
         model: &mut M,
         updates: &[(&str, SqlValue)],
@@ -501,7 +501,7 @@ impl Database {
 
     /// GORM-style delete: DELETE the model row matched by primary key.
     /// Runs the `before_delete`/`after_delete` hooks.
-    pub async fn delete_model<M: Model>(&self, model: &mut M) -> Result<u64, DbError> {
+    pub async fn delete<M: Model>(&self, model: &mut M) -> Result<u64, DbError> {
         let id = model
             .id()
             .ok_or_else(|| DbError::execution_error("Model has no primary key value"))?;
@@ -691,7 +691,7 @@ mod tests {
 
         // create — hooks set timestamps
         let mut pet = Pet::new("Rex", 3);
-        db.create_model(&mut pet).await.unwrap();
+        db.create(&mut pet).await.unwrap();
         assert!(pet.timestamps.created_at.is_some());
 
         // first
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(pets.len(), 1);
 
         // update — hooks refresh updated_at
-        db.update_model(&mut pets[0], &[("age", SqlValue::I32(4))])
+        db.update(&mut pets[0], &[("age", SqlValue::I32(4))])
             .await
             .unwrap();
         assert!(pets[0].timestamps.updated_at.is_some());
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(updated.age, 4);
 
         // delete
-        db.delete_model(&mut pet).await.unwrap();
+        db.delete(&mut pet).await.unwrap();
         let gone: Option<Pet> = db.first_model(&pet.id).await.unwrap();
         assert!(gone.is_none());
     }
