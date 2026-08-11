@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use crate::db::db_types::{Row, SqlValue};
 use crate::db::error::Result;
+use crate::orm::migration::TableDefinition;
 
 /// Model trait - 所有模型需要实现此接口
 pub trait Model: Send + Sync {
@@ -107,6 +108,13 @@ pub trait Model: Send + Sync {
     /// Used by `Database::create` to build the INSERT statement.
     fn columns(&self) -> Vec<(&'static str, SqlValue)> {
         Vec::new()
+    }
+
+    /// The table schema (columns, primary key and GORM-style indexes) for this
+    /// model. Used by `Database::auto_migrate` to create the table and its
+    /// indexes automatically. Implemented by `#[derive(Model)]`.
+    fn schema() -> Option<TableDefinition> {
+        None
     }
 
     /// Reconstruct a model from a query result row.

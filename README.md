@@ -16,6 +16,7 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
 - ✅ **`#[derive(Model)]` Macro** - Generate the `Model` impl from a plain struct, eliminating boilerplate
 - ✅ **GORM-style Model CRUD** - `create` / `first_model` / `find_models` / `update` / `delete` on `Database`
+- ✅ **GORM-style Indexes** - `primaryKey` / `index` / `uniqueIndex` field tags with `auto_migrate` table/index creation
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
 - ✅ **SQL Injection Protection** - Identifier validation/quotation, string escaping, and dangerous-pattern detection (`utils::sql_safety`)
@@ -268,6 +269,47 @@ pub struct User {
 ```
 
 Supported field types: `String`, `bool`, `i8/i16/i32/i64`, `f32/f64`, `chrono::DateTime<Utc>`, `Uuid`, `Vec<u8>` and their `Option<...>` wrappers. Other types are skipped automatically; use `#[model(skip)]` to exclude a field explicitly, and `#[model(column = "...")]` to rename a DB column.
+
+### GORM-style Indexes (`primaryKey` / `index` / `uniqueIndex`)
+
+Like GORM, you can declare the primary key and indexes directly on the struct fields. The macro records them in `Model::schema()` so `Database::auto_migrate()` can create the table and its indexes automatically.
+
+```rust
+use torm::{Model, Timestamps};
+
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "products", primary_key = "id")]
+pub struct Product {
+    #[model(primaryKey)]
+    pub id: i64,                                    // primary key
+
+    #[model(uniqueIndex = "idx_products_sku")]      // named unique index
+    pub sku: String,
+
+    #[model(index)]                                 // bare index -> idx_products_category
+    pub category: String,
+
+    #[model(index = "idx_products_name_category")]  // composite index: name + category2
+    pub name: String,
+    #[model(index = "idx_products_name_category")]
+    pub category2: String,
+
+    pub price: f64,
+}
+```
+
+Supported field tags (inside `#[model(...)]`):
+
+- `primaryKey` — marks the field as the primary key.
+- `index` — creates a plain index. Without a name it defaults to `idx_<table>_<column>`. Fields sharing the same explicit index name form a composite index.
+- `uniqueIndex` — creates a unique index. On a single column it also implies a `UNIQUE` column constraint. Without a name it defaults to `idx_<table>_<column>`.
+
+Then create the table and all indexes on startup (idempotent, uses `IF NOT EXISTS`):
+
+```rust
+let db = torm::Database::sqlite("app.db").await?;
+db.auto_migrate::<Product>().await?;
+```
 
 ### Connection Pool
 

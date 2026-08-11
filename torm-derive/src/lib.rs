@@ -19,6 +19,21 @@
 //!     pub timestamps: Timestamps,
 //! }
 //! ```
+//!
+//! # Field tags
+//!
+//! In addition to the container-level `#[model(table_name = "...", primary_key =
+//! "...")]` attributes, each field may carry GORM-style tags that are recorded
+//! in the generated [`Model::schema`](trait@crate::Model) method so that
+//! [`Database::auto_migrate`](https://docs.rs/torm/latest/torm/db/database/struct.Database.html)
+//! can create the table and its indexes automatically:
+//!
+//! - `#[model(primaryKey)]` — marks the field as the primary key.
+//! - `#[model(index)]` or `#[model(index = "idx_name")]` — a plain index.
+//!   Without a name it defaults to `idx_<table>_<column>`; fields sharing the
+//!   same explicit name form a composite index.
+//! - `#[model(uniqueIndex)]` or `#[model(uniqueIndex = "idx_name")]` — a unique
+//!   index (also implying a `UNIQUE` column constraint on a single column).
 
 extern crate proc_macro;
 
@@ -45,6 +60,20 @@ enum FieldKind {
     Skip,
 }
 
+/// A single index declaration attached to a field, GORM-style.
+///
+/// Parsed from `#[model(index = "...")]`, `#[model(uniqueIndex = "...")]` or
+/// the bare `#[model(index)]` / `#[model(uniqueIndex)]` path forms.
+#[derive(Debug, Clone)]
+struct FieldIndex {
+    /// Index name (empty means derive a default `idx_<table>_<column>`).
+    name: String,
+    /// Unique index flag.
+    unique: bool,
+    /// Composite partners (other columns sharing the same index name).
+    partners: Vec<String>,
+}
+
 /// Decorated struct field.
 struct FieldInfo {
     ident: syn::Ident,
@@ -53,6 +82,8 @@ struct FieldInfo {
     ty: Type,
     /// Whether the type is `Option<...>`.
     optional: bool,
+    /// GORM-style field index declarations.
+    indexes: Vec<FieldIndex>,
 }
 
 impl FieldInfo {
@@ -150,6 +181,7 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
 
         let mut skip = false;
         let mut column: Option<String> = None;
+        let mut indexes: Vec<FieldIndex> = Vec::new();
         for attr in &field.attrs {
             if !attr.path().is_ident("model") {
                 continue;
@@ -159,8 +191,36 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
             for item in nested {
                 match item {
                     Meta::Path(path) if path.is_ident("skip") => skip = true,
+                    Meta::Path(path) if path.is_ident("index") => {
+                        indexes.push(FieldIndex {
+                            name: String::new(),
+                            unique: false,
+                            partners: Vec::new(),
+                        });
+                    }
+                    Meta::Path(path) if path.is_ident("uniqueIndex") => {
+                        indexes.push(FieldIndex {
+                            name: String::new(),
+                            unique: true,
+                            partners: Vec::new(),
+                        });
+                    }
                     Meta::NameValue(nv) if nv.path.is_ident("column") => {
                         column = Some(expr_to_string(&nv.value)?);
+                    }
+                    Meta::NameValue(nv) if nv.path.is_ident("index") => {
+                        indexes.push(FieldIndex {
+                            name: expr_to_string(&nv.value)?,
+                            unique: false,
+                            partners: Vec::new(),
+                        });
+                    }
+                    Meta::NameValue(nv) if nv.path.is_ident("uniqueIndex") => {
+                        indexes.push(FieldIndex {
+                            name: expr_to_string(&nv.value)?,
+                            unique: true,
+                            partners: Vec::new(),
+                        });
                     }
                     _ => {}
                 }
@@ -188,6 +248,7 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
             kind,
             ty,
             optional,
+            indexes,
         });
     }
 
@@ -475,6 +536,136 @@ fn gen_from_row_expr(f: &FieldInfo) -> Option<proc_macro2::TokenStream> {
     }
 }
 
+/// Map a `type_tag` to the migration `ColumnType` variant name.
+fn tag_to_column_type(tag: &str) -> Option<&'static str> {
+    match tag {
+        "i8" | "i16" | "i32" => Some("Integer"),
+        "i64" => Some("BigInteger"),
+        "string" => Some("String"),
+        "bool" => Some("Boolean"),
+        "f32" => Some("Float"),
+        "f64" => Some("Double"),
+        "datetime" => Some("DateTime"),
+        "uuid" => Some("Uuid"),
+        "bytes" => Some("Binary"),
+        _ => None,
+    }
+}
+
+/// Build the `schema()` implementation for a model, returning a
+/// `TableDefinition` describing its columns and GORM-style indexes.
+fn gen_schema_impl(
+    table_name: &str,
+    fields: &[&FieldInfo],
+) -> proc_macro2::TokenStream {
+    // Column definitions for all persistable / pk / timestamp fields.
+    let mut column_toks: Vec<proc_macro2::TokenStream> = Vec::new();
+    for f in fields {
+        if f.kind == FieldKind::Skip {
+            continue;
+        }
+        let col = f.column_name();
+        let optional = f.optional;
+
+        // Resolve column type from the (innermost) persistable tag.
+        let (col_type, is_pk) = match f.kind {
+            FieldKind::PrimaryKey => (
+                tag_to_column_type(type_tag(&f.ty).unwrap_or("string")).or(Some("Integer")),
+                true,
+            ),
+            FieldKind::Persist => (type_tag(&f.ty).and_then(tag_to_column_type), false),
+            FieldKind::TimestampField => (Some("DateTime"), false),
+            FieldKind::Timestamps => {
+                // Backed by a `Timestamps` struct: emit the three timestamp columns.
+                for ts_col in ["created_at", "updated_at", "deleted_at"] {
+                    column_toks.push(quote! {
+                        ColumnDefinition::new(#ts_col, ColumnType::DateTime).nullable(true)
+                    });
+                }
+                continue;
+            }
+            FieldKind::Skip => continue,
+        };
+        let Some(col_type) = col_type else {
+            continue;
+        };
+        let col_type_tok = syn::Ident::new(col_type, Span::call_site());
+
+        // A bare uniqueIndex on a single column implies a unique column too.
+        let is_unique = f.indexes.iter().any(|ix| ix.unique && ix.partners.is_empty());
+
+        let mut col_def = quote! {
+            ColumnDefinition::new(#col, ColumnType::#col_type_tok).nullable(#optional)
+        };
+        if is_pk {
+            col_def = quote! { #col_def .primary_key() };
+        }
+        if is_unique {
+            col_def = quote! { #col_def .unique() };
+        }
+        column_toks.push(col_def);
+    }
+
+    // Index definitions derived from index/uniqueIndex tags, grouped by index
+    // name so composite indexes share a single `IndexDefinition`.
+    let mut index_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut groups: std::collections::HashMap<String, (bool, Vec<String>)> =
+        std::collections::HashMap::new();
+    for f in fields {
+        if f.kind == FieldKind::Skip {
+            continue;
+        }
+        let col = f.column_name();
+        for ix in &f.indexes {
+            let key = if ix.name.is_empty() {
+                col.clone()
+            } else {
+                ix.name.clone()
+            };
+            groups
+                .entry(key.clone())
+                .or_insert((ix.unique, Vec::new()))
+                .1
+                .push(col.clone());
+            if ix.unique {
+                groups.get_mut(&key).unwrap().0 = true;
+            }
+        }
+    }
+    let mut sorted_keys: Vec<&String> = groups.keys().collect();
+    sorted_keys.sort();
+    for key in sorted_keys {
+        let (unique, cols) = &groups[key];
+        let name = if key.starts_with("idx_") {
+            key.clone()
+        } else {
+            format!("idx_{}_{}", table_name, key)
+        };
+        let cols_lit: Vec<syn::LitStr> = cols
+            .iter()
+            .map(|c| syn::LitStr::new(c, Span::call_site()))
+            .collect();
+        if *unique {
+            index_defs.push(quote! {
+                IndexDefinition::new(#name, &[#(#cols_lit),*]).unique()
+            });
+        } else {
+            index_defs.push(quote! {
+                IndexDefinition::new(#name, &[#(#cols_lit),*])
+            });
+        }
+    }
+
+    quote! {
+        fn schema() -> Option<TableDefinition> {
+            Some(TableDefinition::new(#table_name)
+                #( .add_column(#column_toks) )*
+                #( .add_index(#index_defs) )*
+            )
+        }
+    }
+}
+
 /// Build the complete `impl Model for ...` block.
 fn build_model_impl(
     input: &DeriveInput,
@@ -656,6 +847,10 @@ fn build_model_impl(
         }
     }
 
+    // --- schema() ---
+    let field_refs: Vec<&FieldInfo> = fields.iter().collect();
+    let schema_impl = gen_schema_impl(&config.table_name, &field_refs);
+
     quote! {
         #[automatically_derived]
         impl Model for #ident {
@@ -666,6 +861,8 @@ fn build_model_impl(
             #id_fn
             #set_id_fn
             #ts_impl
+
+            #schema_impl
 
             fn columns(&self) -> Vec<(&'static str, SqlValue)> {
                 vec![
@@ -704,6 +901,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             use torm::db::db_types::{Row, SqlValue};
             use torm::chrono::{DateTime, Utc};
             use torm::Uuid;
+            use torm::orm::migration::{
+                TableDefinition, ColumnDefinition, ColumnType, IndexDefinition,
+            };
 
             #model_impl
         };

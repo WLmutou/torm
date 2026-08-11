@@ -1,5 +1,6 @@
 use crate::db::db_types::{SqlValue, QueryResult, DbType};
 use crate::orm::model::Model;
+use crate::orm::migration::{ColumnDefinition, IndexDefinition, TableDefinition};
 use crate::utils::sql_safety::validate_identifier;
 use std::sync::Arc;
 
@@ -515,6 +516,104 @@ impl Database {
         let affected = self.execute(&sql, &[SqlValue::String(id)]).await?;
         model.after_delete()?;
         Ok(affected)
+    }
+
+    /// GORM-style auto migration: create the model's table (if missing) and
+    /// all of its indexes (primary key, `index`, `uniqueIndex`) based on the
+    /// `TableDefinition` produced by `Model::schema()`.
+    ///
+    /// Idempotent: uses `IF NOT EXISTS` so it is safe to call on every startup.
+    pub async fn auto_migrate<M: Model>(&self) -> Result<(), DbError> {
+        let Some(table) = M::schema() else {
+            return Err(DbError::execution_error(format!(
+                "Model {} does not expose a schema (implement Model::schema or use #[derive(Model)])",
+                M::table_name()
+            )));
+        };
+
+        self.execute(&self.build_create_table_sql(&table), &[]).await?;
+
+        for index in &table.indexes {
+            self.execute(&self.build_create_index_sql(&table, index), &[])
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Build a `CREATE TABLE IF NOT EXISTS` statement from a `TableDefinition`.
+    fn build_create_table_sql(&self, table: &TableDefinition) -> String {
+        let mut column_defs: Vec<String> = table
+            .columns
+            .iter()
+            .map(|col| self.build_column_sql(col))
+            .collect();
+
+        let primary_keys: Vec<String> = table
+            .columns
+            .iter()
+            .filter(|col| col.primary_key)
+            .map(|col| col.name.clone())
+            .collect();
+        if !primary_keys.is_empty() {
+            column_defs.push(format!("PRIMARY KEY ({})", primary_keys.join(", ")));
+        }
+
+        let mut sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} (\n{}\n)",
+            safe_identifier(&table.name),
+            column_defs.join(",\n")
+        );
+
+        if let Some(engine) = &table.engine {
+            sql.push_str(&format!(" ENGINE={}", engine));
+        }
+        if let Some(charset) = &table.charset {
+            sql.push_str(&format!(" CHARSET={}", charset));
+        }
+        sql
+    }
+
+    /// Build a column definition clause for `CREATE TABLE`.
+    fn build_column_sql(&self, column: &ColumnDefinition) -> String {
+        let mut sql = format!(
+            "  {} {}",
+            safe_identifier(&column.name),
+            column.column_type.as_sql(self.db_type())
+        );
+
+        if column.primary_key && column.auto_increment {
+            match self.db_type() {
+                DbType::MySQL => sql.push_str(" AUTO_INCREMENT"),
+                DbType::PostgreSQL => sql.push_str(" SERIAL"),
+                DbType::SQLite => sql.push_str(" AUTOINCREMENT"),
+            }
+        }
+        if !column.nullable {
+            sql.push_str(" NOT NULL");
+        }
+        if let Some(default) = &column.default {
+            sql.push_str(&format!(" DEFAULT {}", default));
+        }
+        if column.unique {
+            sql.push_str(" UNIQUE");
+        }
+        sql
+    }
+
+    /// Build a `CREATE [UNIQUE] INDEX IF NOT EXISTS` statement.
+    fn build_create_index_sql(&self, table: &TableDefinition, index: &IndexDefinition) -> String {
+        let unique = if index.unique { "UNIQUE " } else { "" };
+        format!(
+            "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+            unique,
+            safe_identifier(&index.name),
+            safe_identifier(&table.name),
+            index.columns
+                .iter()
+                .map(|c| safe_identifier(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 

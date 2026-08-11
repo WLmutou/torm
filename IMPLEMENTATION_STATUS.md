@@ -92,14 +92,14 @@
 - ❌ `Scopes` - 复用查询条件
 
 #### 数据迁移
-- ❌ `AutoMigrate` - 完整的自动迁移（基础框架完成）
-- ❌ `CreateTable` - 创建表（基础框架完成）
+- ✅ `AutoMigrate` - 基于 `Model::schema()` 自动建表与索引（`Database::auto_migrate`）
+- ✅ `CreateTable` - 从 `TableDefinition` 生成 `CREATE TABLE IF NOT EXISTS`
+- ✅ 索引支持 - `primaryKey` / `index` / `uniqueIndex` 字段标签自动创建索引（`CREATE [UNIQUE] INDEX IF NOT EXISTS`）
 - ❌ `DropTable` - 删除表
 - ❌ `AddColumn` - 添加列
 - ❌ `DropColumn` - 删除列
 - ❌ `ModifyColumn` - 修改列
 - ❌ `RenameColumn` - 重命名列
-- ❌ 支持索引的创建和删除
 
 #### 日志与性能
 - ❌ SQL 日志记录（慢查询、错误查询）

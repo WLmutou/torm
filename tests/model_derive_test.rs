@@ -528,3 +528,137 @@ async fn sql_statement_execute_and_query() {
     assert_eq!(sql, "SELECT * FROM users WHERE id = ?");
     assert_eq!(params, vec![SqlValue::I64(1)]);
 }
+
+// ------------------------------------------------------------------
+// GORM-style index / schema tests: primaryKey / index / uniqueIndex.
+// ------------------------------------------------------------------
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "products", primary_key = "id")]
+struct Product {
+    #[model(primaryKey)]
+    id: i64,
+    // Named unique index; single-column uniqueIndex also implies a unique column.
+    #[model(uniqueIndex = "idx_products_sku")]
+    sku: String,
+    // Bare `index` derives a column-named index: idx_products_category.
+    #[model(index)]
+    category: String,
+    // Composite index: two fields share the same index name.
+    #[model(index = "idx_products_name_category")]
+    name: String,
+    #[model(index = "idx_products_name_category")]
+    category2: String,
+    price: f64,
+}
+
+#[test]
+fn schema_generates_columns_and_primary_key() {
+    let table = Product::schema().expect("schema should be generated");
+    assert_eq!(table.name, "products");
+
+    let pk_cols: Vec<String> = table
+        .columns
+        .iter()
+        .filter(|c| c.primary_key)
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(pk_cols, vec!["id"]);
+
+    // `sku` marked uniqueIndex is a unique column.
+    let sku_col = table
+        .columns
+        .iter()
+        .find(|c| c.name == "sku")
+        .expect("sku column");
+    assert!(sku_col.unique);
+}
+
+#[test]
+fn schema_generates_indexes() {
+    let table = Product::schema().unwrap();
+    let names: Vec<&str> = table.indexes.iter().map(|i| i.name.as_str()).collect();
+
+    assert!(names.contains(&"idx_products_sku"), "got {names:?}");
+    assert!(names.contains(&"idx_products_category"), "got {names:?}");
+    assert!(names.contains(&"idx_products_name_category"), "got {names:?}");
+
+    let sku_idx = table
+        .indexes
+        .iter()
+        .find(|i| i.name == "idx_products_sku")
+        .expect("sku index");
+    assert!(sku_idx.unique);
+    assert_eq!(sku_idx.columns, vec!["sku"]);
+
+    let composite = table
+        .indexes
+        .iter()
+        .find(|i| i.name == "idx_products_name_category")
+        .expect("composite index");
+    assert_eq!(composite.columns, vec!["name", "category2"]);
+}
+
+#[tokio::test]
+async fn auto_migrate_creates_table_and_indexes() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+
+    db.auto_migrate::<Product>().await.expect("auto migrate");
+
+    // Table exists.
+    let res = db
+        .query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='products'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.rows.len(), 1);
+
+    // Indexes exist.
+    let idx_res = db
+        .query(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='products'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let idx_names: Vec<String> = idx_res
+        .rows
+        .iter()
+        .map(|r| match r.get("name") {
+            Some(SqlValue::String(s)) => s.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    assert!(idx_names.iter().any(|n| n == "idx_products_sku"));
+    assert!(idx_names.iter().any(|n| n == "idx_products_category"));
+    assert!(idx_names.iter().any(|n| n == "idx_products_name_category"));
+
+    // Idempotent.
+    db.auto_migrate::<Product>().await.expect("second migrate");
+
+    // Insert works; duplicate sku rejected by the unique index.
+    let mut p1 = Product {
+        id: 1,
+        sku: "SKU-1".to_string(),
+        category: "a".to_string(),
+        name: "p1".to_string(),
+        category2: "x".to_string(),
+        price: 1.0,
+    };
+    db.create(&mut p1).await.expect("insert p1");
+
+    let mut p2 = Product {
+        id: 2,
+        sku: "SKU-1".to_string(),
+        category: "b".to_string(),
+        name: "p2".to_string(),
+        category2: "y".to_string(),
+        price: 2.0,
+    };
+    let dup = db.create(&mut p2).await;
+    assert!(
+        dup.is_err(),
+        "duplicate sku should be rejected by unique index"
+    );
+}
