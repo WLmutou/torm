@@ -4,6 +4,7 @@ pub mod database;
 pub mod driver;
 pub mod error;
 pub mod storage;
+pub mod async_storage;
 pub mod sqlite;
 pub mod mysql;
 pub mod postgresql;

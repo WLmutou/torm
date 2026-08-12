@@ -23,6 +23,7 @@ pub use db::sqlite::SqliteConnection;
 pub use db::mysql::MySqlConnection;
 pub use db::postgresql::PostgresConnection;
 pub use db::storage::{StorageEngine, TableSchema, ColumnDefinition as StorageColumnDefinition, ColumnType as StorageColumnType, WhereClause, StorageError};
+pub use db::async_storage::AsyncStorageEngine;
 pub use db::driver::{DBDriver, Dsn};
 pub use db::error::{Result, TormError};
 pub use db::pool::Pool;
