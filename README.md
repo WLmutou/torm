@@ -13,9 +13,12 @@ TORM is a Rust ORM (Object-Relational Mapping) library built on the Tokio async 
 - ✅ **Fluent Query Builder** - Clean and intuitive query API
 - ✅ **Query Direct Execution** - `insert` / `update` / `delete` execute SQL directly, inspect with `return_sql()`
 - ✅ **Advanced Queries** - JOIN, GROUP BY, HAVING, aggregate functions
+- ✅ **Zero `SqlValue`** - `where_*` / `insert` / `update` accept plain Rust values (`i32` / `f64` / `&str` / `bool` ...) via `Into<SqlValue>`
+- ✅ **Dapper-style Typed Mapping** - `QueryExecutor::models::<M>()` maps rows back into typed `Vec<M>`
 - ✅ **Model Trait** - Automatic management of created_at, updated_at timestamps
 - ✅ **`#[derive(Model)]` Macro** - Generate the `Model` impl from a plain struct, eliminating boilerplate
-- ✅ **GORM-style Model CRUD** - `create` / `first_model` / `find_models` / `update` / `delete` on `Database`
+- ✅ **GORM-style Model CRUD** - `create` / `first` / `last` / `all` / `update` / `delete` on `Database`
+- ✅ **Auto-increment Primary Key** - `#[derive(Model)]` marks integer PK auto-increment; `id: 0` auto-assigns & refills
 - ✅ **GORM-style Indexes** - `primaryKey` / `index` / `uniqueIndex` field tags with `auto_migrate` table/index creation
 - ✅ **Transaction Support** - Create, commit, and rollback transactions
 - ✅ **Connection Pooling** - Pools for SQLite/MySQL/PostgreSQL
@@ -54,7 +57,9 @@ rand = "0.8"
 | In-memory engine | Pure Rust StorageEngine | ✅ Complete |
 | MySQL | Custom wire protocol (native) | ✅ Complete |
 | PostgreSQL | Custom wire protocol (native) | ✅ Complete |
-| Type safety | Custom SqlValue | ✅ Complete |
+| Type safety | SqlValue + auto-conversion (`Into<SqlValue>`) | ✅ Complete |
+| Typed mapping | Dapper-style: model CRUD maps rows back to typed structs | ✅ Complete |
+| Auto-increment PK | `#[derive(Model)]` marks integer PK auto-increment | ✅ Complete |
 | Transactions | Custom implementation | ✅ Complete |
 
 ## 🏗 Module Structure
@@ -93,36 +98,44 @@ src/
 
 ### Basic Usage
 
+The recommended way is to **define a `#[derive(Model)]` struct first**, then use the high-level ORM API. All insert / query / update / delete values are plain Rust types — no `SqlValue` needed.
+
 ```rust
-use torm::{Database, SqlValue};
+use torm::{Database, Model, Query};
+
+// Define a model; the macro generates the schema, column mapping and from_row.
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,        // 0 -> auto-increment, auto-filled after create
+    pub name: String,
+    pub age: i32,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create a SQLite database (standard SQLite file format)
     let db = Database::sqlite("mydb.db").await?;
 
-    // 2. Create a table
-    db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)", &[]).await?;
+    // 2. Auto-create the table from the model schema
+    db.auto_migrate::<User>().await?;
 
-    // 3. Insert data (parameter binding supported)
-    db.execute(
-        "INSERT INTO users (name, age) VALUES (?, ?)",
-        &[SqlValue::String("Alice".to_string()), SqlValue::I32(25)],
-    ).await?;
+    // 3. Insert data (id auto-assigned & written back)
+    let mut alice = User { id: 0, name: "Alice".into(), age: 25 };
+    db.create(&mut alice).await?;
 
-    // 4. Query data
-    let result = db.query("SELECT * FROM users WHERE age > ?", &[SqlValue::I32(20)]).await?;
-    for row in &result.rows {
-        println!("{:?}", row.get("name"));
+    // 4. Query with conditions, mapped back to Vec<User>
+    let adults: Vec<User> = Query::new("users")
+        .where_gte("age", 18)
+        .query(&db)
+        .models::<User>()
+        .await?;
+    for u in &adults {
+        println!("{}: {}", u.name, u.age);
     }
 
-    // 5. Transactions
-    let mut tx = db.begin_transaction().await?;
-    tx.execute("INSERT INTO users (name, age) VALUES (?, ?)", &[
-        SqlValue::String("Bob".to_string()),
-        SqlValue::I32(30),
-    ]).await?;
-    tx.commit().await?;
+    // 5. Update (executes SQL, returns affected rows)
+    let affected = db.update(&mut alice, &[("age", 26)]).await?;
 
     db.close().await?;
     Ok(())
@@ -136,8 +149,9 @@ $ sqlite3 mydb.db ".tables"
 users
 $ sqlite3 mydb.db "SELECT * FROM users;"
 1|Alice|25
-2|Bob|30
 ```
+
+> If you prefer **low-level raw SQL** (e.g. for arbitrary queries), use `db.execute(sql, &[SqlValue...])` — see the "Type-Safe SQL Values" section below.
 
 ### Type-Safe SQL Values
 
@@ -187,7 +201,7 @@ assert!(contains_injection_pattern("SELECT * FROM users WHERE id = ?").is_none()
 `Query` provides a fluent builder that can **execute directly** against a `&Database`, or **inspect** the generated SQL with `return_sql()`.
 
 ```rust
-use torm::{Database, Query, SqlValue};
+use torm::{Database, Query};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -198,11 +212,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
 
     // ---- Writes execute directly (INSERT / UPDATE / DELETE) ----
-    let q = Query::new("users").where_eq("name", SqlValue::String("Alice".to_string()));
+    // Values accept plain Rust types (i32 / f64 / &str / bool / String ...) —
+    // no need to wrap them in SqlValue::*.
+    let q = Query::new("users").where_eq("name", "Alice");
 
     let affected = q.update(
         &{ let mut m = std::collections::HashMap::new();
-           m.insert("age".to_string(), SqlValue::I32(31)); m },
+           m.insert("age".to_string(), 31); m },
         &db,
     ).await?;                                // executes UPDATE, returns affected rows
 
@@ -212,11 +228,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Insert / delete execute the same way
     Query::new("users").insert(
-        &[("name", SqlValue::String("Bob".to_string())),
-          ("age", SqlValue::I32(25))],
+        &[("name", "Bob"),
+          ("age", 25)],
         &db,
     ).await?;
-    Query::new("users").where_eq("age", SqlValue::I32(25)).delete(&db).await?;
+    Query::new("users").where_eq("age", 25).delete(&db).await?;
 
     // ---- Reads: QueryExecutor via query(db), or SqlStatement via build() ----
     let result = Query::new("users").query(&db).select().await?;  // executes SELECT
@@ -224,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rows.first().and_then(|r| r.get("COUNT(*)")).and_then(|v| v.as_i64()).unwrap_or(0);
 
     // build().query() also works, and return_sql() inspects the SQL
-    let result = Query::new("users").where_gt("age", SqlValue::I32(20)).build()
+    let result = Query::new("users").where_gt("age", 20).build()
         .query(&db).await?;                  // executes SELECT
     let (sql, _) = Query::new("users").count().return_sql();
     // sql: "SELECT COUNT(*) FROM users"
@@ -233,10 +249,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+All `where_*` / `update` / `insert` values accept **plain Rust values** (`i32` / `i64` / `f32` / `f64` / `&str` / `String` / `bool` / `Vec<u8>` / `chrono::DateTime<Utc>` and the unsigned variants) via `Into<SqlValue>` — you never need to write `SqlValue::Type(...)`.
+
 `Query::query(db)` returns a **`QueryExecutor`** for chaining read operations:
 
 - `QueryExecutor::count()` - executes `SELECT COUNT(*)`, returning a result set with a `COUNT(*)` column
 - `QueryExecutor::select()` - executes `SELECT *`
+- `QueryExecutor::models::<M>()` - executes `SELECT *` and maps every row back into a typed `Vec<M>` via the `Model` trait (requires `#[derive(Model)]`)
 
 `Query` also returns a `SqlStatement` from `build()` / `count()` / `build_update()` / etc., which offers both execution and inspection:
 
@@ -248,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Deriving a Model
 
-Instead of hand-writing the `Model` impl, annotate your struct with `#[derive(Model)]` and a `#[model(table_name = "...")]` attribute. The macro generates `columns()`, `from_row()`, primary-key accessors, and timestamp accessors for you.
+Instead of hand-writing the `Model` impl, annotate your struct with `#[derive(Model)]` and a `#[model(table_name = "...")]` attribute. The macro generates `columns()`, `from_row()`, primary-key accessors, timestamp accessors, and the `schema()` for `auto_migrate` — all **zero `SqlValue`**. An **integer primary key is marked auto-increment automatically** (`AUTOINCREMENT` on SQLite, `AUTO_INCREMENT` on MySQL, `SERIAL` on PostgreSQL), so inserting a model with `id: 0` assigns the id and writes it back.
 
 ```rust
 use torm::{Model, Timestamps};
@@ -310,6 +329,56 @@ Then create the table and all indexes on startup (idempotent, uses `IF NOT EXIST
 let db = torm::Database::sqlite("app.db").await?;
 db.auto_migrate::<Product>().await?;
 ```
+
+### Dapper-style Typed CRUD
+
+Once a model is derived, **insert / query / update / delete never touch `SqlValue`** — values are plain Rust types and results come back as typed structs (Dapper-style `Query<T>`).
+
+```rust
+use torm::{Database, Model, Query};
+
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,        // 0 -> auto-assigned on create
+    pub name: String,
+    pub email: String,
+    pub age: i32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::sqlite("app.db").await?;
+    db.auto_migrate::<User>().await?;
+
+    // 1. Insert: id = 0 triggers auto-increment, then auto-refilled.
+    let mut alice = User { id: 0, name: "Alice".into(), email: "a@e.com".into(), age: 25 };
+    db.create(&mut alice).await?;
+    println!("id = {}", alice.id); // 1
+
+    // 2. Query: map every row back into Vec<User>.
+    let adults: Vec<User> = Query::new("users")
+        .where_gte("age", 18)
+        .order_by_desc("age")
+        .query(&db)
+        .models::<User>()
+        .await?;
+
+    // 3. Update: executes SQL directly, returns affected rows.
+    let affected = db.update(&mut alice, &[("age", 26)]).await?;
+
+    // 4. Read by primary key / all rows, still typed.
+    let one: Option<User> = db.first::<User>(&alice.id.to_string()).await?;
+    let last: Option<User> = db.last::<User>().await?;
+    let all: Vec<User> = db.all::<User>().await?;
+
+    // 5. Delete by model.
+    let n = db.delete(&mut alice).await?;
+    Ok(())
+}
+```
+
+`Database::update(model, &[(column, value), ...])` executes the `UPDATE` immediately and returns the number of affected rows. Values are plain Rust types (`i32`/`&str`/... ) when all columns share a type; for **mixed-type columns**, pass them as `SqlValue` (e.g. `&[("age", SqlValue::I32(30)), ("email", SqlValue::String("x".into()))]`).
 
 ### Connection Pool
 
@@ -388,22 +457,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 🏃 Run Examples
 
+All examples follow the same pattern: **define a `#[derive(Model)]` struct first, then use the high-level ORM API** — insert / query / update / delete never touch `SqlValue`.
+
 ```bash
-# Basic usage example
+# Dapper-style typed CRUD (define a struct, then create / first / last / all / update / delete)
+cargo run --example dapper_style
+
+# Async concurrency: struct + auto_migrate, parallel queries mapped back to Vec<Product>
+cargo run --example async_concurrency
+
+# Ergonomic Query builder: plain Rust values, no SqlValue::Type(...)
+cargo run --example ergonomic_query
+
+# Full integration: connection, auto-migrate, typed CRUD, count
+cargo run --example integration_example
+
+# Basic usage (uuid / error handling / cache / connection pool) + typed model
 cargo run --example basic_usage
 
-# Complete feature demo
+# Complete feature demo + file persistence via a derived model
 cargo run --example complete_demo
 
-# Advanced features demo (relations, migrations, performance)
+# Advanced features (JOIN / GROUP BY / HAVING / aggregates)
 cargo run --example advanced_features
-
-# Database integration example
-cargo run --example integration_example
 
 # Run tests
 cargo test
 ```
+
+The PostgreSQL example (`postgresql_example.rs`) additionally shows the **low-level raw SQL + `SqlValue`** binding for parameterized queries, which is only needed when you bypass the ORM and write SQL by hand.
 
 ## 🔄 Database Migration Tools
 
@@ -415,6 +497,8 @@ TORM ships with four standalone CLI tools (under `src/bin/`) that migrate schema
 | `postgresql2mysql` | PostgreSQL → MySQL |
 | `sqlite2postgres` | SQLite → PostgreSQL |
 | `postgres2sqlite` | PostgreSQL → SQLite |
+| `mysql2sqlite` | MySQL → SQLite |
+| `sqlite2mysql` | SQLite → MySQL|
 
 ### Build
 

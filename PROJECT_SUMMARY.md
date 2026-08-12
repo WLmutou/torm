@@ -46,10 +46,17 @@
 - ✅ **统一错误类型**: TormError 枚举
 - ✅ **类型别名**: Result<T> 简化错误处理
 
-### 9. 测试和文档
-- ✅ **单元测试**: 30+ 个测试用例
-- ✅ **示例代码**: basic_usage.rs, complete_demo.rs
-- ✅ **项目文档**: README.md, IMPLEMENTATION_STATUS.md
+### 9. Dapper 风格类型化 CRUD（零 SqlValue）
+- ✅ **值自动转换**: `SqlValue` 为常见标量类型提供 `From` 实现（`i8/i16/i32/i64/isize/u8/u16/u32/u64/usize/f32/f64/String/&str/&String/bool/Vec<u8>/&[u8]/DateTime<Utc>`），`where_*` / `insert` / `update` 直接书写原生值
+- ✅ **`QueryExecutor::models::<M>()`**: 条件查询结果自动映射回类型化 `Vec<M>`
+- ✅ **`Database::update(model, &[(&str, V)])`**: 直接执行 SQL 并返回受影响行数；`V: Into<SqlValue>` 同类型列用原生值，异构列用 `SqlValue` 统一
+- ✅ **自增主键**: `#[derive(Model)]` 自动标记整型主键自增（SQLite `AUTOINCREMENT` / MySQL `AUTO_INCREMENT` / PostgreSQL `SERIAL`），`id: 0` 插入后自动回填
+- ✅ **`SqlValue::as_f64()`**: 补齐浮点列读取访问器
+
+### 10. 测试和文档
+- ✅ **单元测试**: 200+ 个测试用例（lib + model_derive 集成测试）
+- ✅ **示例代码**: dapper_style.rs, async_concurrency.rs, ergonomic_query.rs, integration_example.rs, basic_usage.rs, complete_demo.rs, advanced_features.rs, postgresql_example.rs（均为「先定义 `#[derive(Model)]` 结构体 → 高层 ORM API」模式，零 `SqlValue`）
+- ✅ **项目文档**: README.md, README.zh.md, IMPLEMENTATION_STATUS.md
 - ✅ **使用指南**: 详细的 API 文档
 
 ## 📁 项目结构
@@ -67,10 +74,17 @@ torm/
 │   ├── error.rs                  # 错误处理
 │   └── torm_tests.rs             # 测试模块
 ├── examples/
-│   ├── basic_usage.rs            # 基本示例
-│   └── complete_demo.rs          # 完整演示
+│   ├── dapper_style.rs           # Dapper 风格类型化 CRUD
+│   ├── async_concurrency.rs      # 异步并发（结构体 + 自动建表）
+│   ├── ergonomic_query.rs        # 优雅 Query 构建器
+│   ├── integration_example.rs    # 完整集成 CRUD
+│   ├── basic_usage.rs            # 基础用法 + 类型化模型
+│   ├── complete_demo.rs          # 完整演示 + 文件持久化
+│   ├── advanced_features.rs      # JOIN / GROUP BY / HAVING
+│   └── postgresql_example.rs     # PostgreSQL（含 raw SQL + SqlValue）
 ├── tests/
-│   └── integration_test.rs       # 集成测试
+│   ├── model_derive_test.rs      # 派生模型集成测试
+│   └── sql_injection_test.rs     # SQL 注入防护测试
 └── 文档...
 ```
 
@@ -114,9 +128,11 @@ let (sql, bindings) = Query::new("users")
 1. **完整的异步支持**: 基于 Tokio 的异步/await 操作
 2. **类型安全**: Rust 类型系统保证安全性
 3. **流畅API**: 类似 GORM 的链式调用
-4. **生命周期钩子**: 完整的生命周期管理
-5. **错误处理**: 统一的错误处理机制
-6. **时间戳管理**: 自动管理时间戳
+4. **Dapper 风格类型化 CRUD**: 全程零 `SqlValue`，查询自动映射回类型化结构体
+5. **自增主键自动回填**: `#[derive(Model)]` 自动标记整型主键自增
+6. **生命周期钩子**: 完整的生命周期管理
+7. **错误处理**: 统一的错误处理机制
+8. **时间戳管理**: 自动管理时间戳
 
 ## 📈 后续计划
 

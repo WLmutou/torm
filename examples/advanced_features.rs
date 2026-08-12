@@ -105,7 +105,7 @@ fn demonstrate_advanced_queries() -> std::result::Result<(), Box<dyn std::error:
     let (sql, _) = AdvancedQuery::new("orders")
         .select(&["user_id", "COUNT(*) as order_count", "SUM(total) as total_spent"])
         .group_by(&["user_id"])
-        .having(torm::orm::query::WhereCondition::Gte("COUNT(*)".to_string(), torm::SqlValue::String("5".to_string())))
+        .having(torm::orm::query::WhereCondition::Gte("COUNT(*)".to_string(), "5".into()))
         .order_by_desc("total_spent")
         .build_select();
     

@@ -148,7 +148,7 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
     println!("  ✅ Created: id={} name={}", bob.id, bob.name);
 
     // First — GORM `db.First(&user, id)` equivalent
-    let found: Option<User> = db.first_model(&alice.id).await?;
+    let found: Option<User> = db.first(&alice.id).await?;
     match &found {
         Some(u) => println!(
             "  ✅ First: id={} name={} age={:?} status={}",
@@ -158,7 +158,7 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
     }
 
     // Find all — GORM `db.Find(&users)` equivalent
-    let users: Vec<User> = db.find_models().await?;
+    let users: Vec<User> = db.all().await?;
     println!("  ✅ Find: {} user(s)", users.len());
     for u in &users {
         println!(
@@ -168,14 +168,13 @@ async fn demonstrate_crud() -> std::result::Result<(), Box<dyn std::error::Error
     }
 
     // Update — GORM `db.Model(&user).Update("age", 29)` equivalent
-    db.update(&mut alice, &[("age", SqlValue::I32(29))])
-        .await?;
-    let updated: User = db.first_model(&alice.id).await?.expect("alice exists");
+    db.update(&mut alice, &[("age", 29)]).await?;
+    let updated: User = db.first(&alice.id).await?.expect("alice exists");
     println!("  ✅ Updated: {} age now {:?}", updated.name, updated.age);
 
     // Delete — GORM `db.Delete(&user)` equivalent
     db.delete(&mut alice).await?;
-    let gone: Option<User> = db.first_model(&alice.id).await?;
+    let gone: Option<User> = db.first(&alice.id).await?;
     println!(
         "  ✅ Deleted: {} exists after delete = {}",
         alice.name,
@@ -197,18 +196,18 @@ async fn demonstrate_transactions() -> std::result::Result<(), Box<dyn std::erro
     tx.execute(
         "INSERT INTO users (id, name, age) VALUES ($1, $2, $3)",
         &[
-            SqlValue::String(SimpleUuid::new_v4().to_string()),
-            SqlValue::String("Dave".to_string()),
-            SqlValue::I32(40),
+            SimpleUuid::new_v4().to_string().into(),
+            "Dave".into(),
+            40.into(),
         ],
     )
     .await?;
     tx.execute(
         "INSERT INTO users (id, name, age) VALUES ($1, $2, $3)",
         &[
-            SqlValue::String(SimpleUuid::new_v4().to_string()),
-            SqlValue::String("Frank".to_string()),
-            SqlValue::I32(35),
+            SimpleUuid::new_v4().to_string().into(),
+            "Frank".into(),
+            35.into(),
         ],
     )
     .await?;
@@ -220,9 +219,9 @@ async fn demonstrate_transactions() -> std::result::Result<(), Box<dyn std::erro
     tx.execute(
         "INSERT INTO users (id, name, age) VALUES ($1, $2, $3)",
         &[
-            SqlValue::String(SimpleUuid::new_v4().to_string()),
-            SqlValue::String("Eve".to_string()),
-            SqlValue::I32(45),
+            SimpleUuid::new_v4().to_string().into(),
+            "Eve".into(),
+            45.into(),
         ],
     )
     .await?;
@@ -417,7 +416,7 @@ fn demonstrate_query_builder() {
 
     // IN query
     let (sql, bindings) = QueryBuilder::new(User::table_name())
-        .where_in("id", vec![SqlValue::I32(1), SqlValue::I32(2), SqlValue::I32(3)])
+        .where_in("id", vec![1, 2, 3])
         .build();
     println!();
     println!("  IN query:");

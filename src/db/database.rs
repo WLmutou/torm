@@ -414,7 +414,7 @@ impl Database {
     }
 
     /// GORM-style first: find one model by primary key.
-    pub async fn first_model<M: Model>(&self, id: &str) -> Result<Option<M>, DbError> {
+    pub async fn first<M: Model>(&self, id: &str) -> Result<Option<M>, DbError> {
         M::before_find()?;
         let sql = format!(
             "SELECT * FROM {} WHERE {} = {} LIMIT 1",
@@ -438,8 +438,32 @@ impl Database {
         }
     }
 
-    /// GORM-style find: load all rows of the model's table.
-    pub async fn find_models<M: Model>(&self) -> Result<Vec<M>, DbError> {
+    /// GORM-style last: find the last model by primary key (descending).
+    pub async fn last<M: Model>(&self) -> Result<Option<M>, DbError> {
+        M::before_find()?;
+        let sql = format!(
+            "SELECT * FROM {} ORDER BY {} DESC LIMIT 1",
+            safe_identifier(M::table_name()),
+            safe_identifier(M::primary_key())
+        );
+        let result = self.query(&sql, &[]).await?;
+        match result.rows.first() {
+            Some(row) => {
+                let mut model = M::from_row(row).ok_or_else(|| {
+                    DbError::ParseError(format!(
+                        "Failed to build {} from query row",
+                        M::table_name()
+                    ))
+                })?;
+                model.after_find()?;
+                Ok(Some(model))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// GORM-style all: load all rows of the model's table.
+    pub async fn all<M: Model>(&self) -> Result<Vec<M>, DbError> {
         M::before_find()?;
         let sql = format!("SELECT * FROM {}", safe_identifier(M::table_name()));
         let result = self.query(&sql, &[]).await?;
@@ -457,19 +481,42 @@ impl Database {
         Ok(models)
     }
 
-    /// GORM-style update: UPDATE the given columns of the model, matched by primary key.
-    /// Runs the `before_update`/`after_update` hooks and refreshes `updated_at`.
-    pub async fn update<M: Model>(
+    /// Dapper-style update: UPDATE the given columns of the model, matched by
+    /// primary key. Executes the SQL directly and returns the number of affected
+    /// rows. Runs the `before_update`/`after_update` hooks and refreshes
+    /// `updated_at`.
+    ///
+    /// 值参数 `V: Into<SqlValue>` 接受原生 Rust 值（`i32`/`f64`/`&str`/`String`/
+    /// `bool` 等），无需手写 `SqlValue::*`。适用于各列值类型相同的场景
+    /// （如全为 `&str` 或全为整数）：
+    ///
+    /// ```ignore
+    /// let n = db.update(&mut user, &[("name", "a"), ("email", "b")]).await?;
+    /// let n = db.update(&mut user, &[("age", 30)]).await?;
+    /// ```
+    ///
+    /// 若各列值类型不同（`age` 为整数、`email` 为字符串），将值统一为
+    /// `SqlValue` 即可，例如：
+    ///
+    /// ```ignore
+    /// let n = db
+    ///     .update(&mut user, &[("age", SqlValue::I32(30)), ("email", SqlValue::String("x".into()))])
+    ///     .await?;
+    /// ```
+    pub async fn update<M: Model, V: Clone + Into<SqlValue>>(
         &self,
         model: &mut M,
-        updates: &[(&str, SqlValue)],
+        updates: &[(&str, V)],
     ) -> Result<u64, DbError> {
         let id = model
             .id()
             .ok_or_else(|| DbError::execution_error("Model has no primary key value"))?;
         model.before_update()?;
 
-        let mut sets: Vec<(&str, SqlValue)> = updates.to_vec();
+        let mut sets: Vec<(&str, SqlValue)> = updates
+            .iter()
+            .map(|&(col, ref val)| (col, (*val).clone().into()))
+            .collect();
         if let Some(ts) = model.updated_at() {
             sets.push(("updated_at", SqlValue::DateTime(ts)));
         }
@@ -548,14 +595,20 @@ impl Database {
             .map(|col| self.build_column_sql(col))
             .collect();
 
-        let primary_keys: Vec<String> = table
-            .columns
-            .iter()
-            .filter(|col| col.primary_key)
-            .map(|col| col.name.clone())
-            .collect();
-        if !primary_keys.is_empty() {
-            column_defs.push(format!("PRIMARY KEY ({})", primary_keys.join(", ")));
+        // SQLite 中自增主键需作为列约束声明（INTEGER PRIMARY KEY AUTOINCREMENT），
+        // 不能再追加表级 `PRIMARY KEY (...)`，否则会报错。其余数据库保留表级约束。
+        let inline_sqlite_pk = matches!(self.db_type(), DbType::SQLite)
+            && table.columns.iter().any(|c| c.primary_key && c.auto_increment);
+        if !inline_sqlite_pk {
+            let primary_keys: Vec<String> = table
+                .columns
+                .iter()
+                .filter(|col| col.primary_key)
+                .map(|col| col.name.clone())
+                .collect();
+            if !primary_keys.is_empty() {
+                column_defs.push(format!("PRIMARY KEY ({})", primary_keys.join(", ")));
+            }
         }
 
         let mut sql = format!(
@@ -575,6 +628,20 @@ impl Database {
 
     /// Build a column definition clause for `CREATE TABLE`.
     fn build_column_sql(&self, column: &ColumnDefinition) -> String {
+        // SQLite 自增主键必须以列约束形式声明为 `INTEGER PRIMARY KEY AUTOINCREMENT`
+        //（AUTOINCREMENT 只允许作用于 INTEGER PRIMARY KEY 列别名）。
+        if matches!(self.db_type(), DbType::SQLite)
+            && column.primary_key
+            && column.auto_increment
+        {
+            // SQLite 的 AUTOINCREMENT 仅允许用于 `INTEGER PRIMARY KEY`（rowid 别名），
+            // 因此统一渲染为 `INTEGER`，忽略底层 INTEGER/BIGINT 差异。
+            return format!(
+                "  {} INTEGER PRIMARY KEY AUTOINCREMENT",
+                safe_identifier(&column.name)
+            );
+        }
+
         let mut sql = format!(
             "  {} {}",
             safe_identifier(&column.name),
@@ -794,24 +861,22 @@ mod tests {
         assert!(pet.timestamps.created_at.is_some());
 
         // first
-        let found: Option<Pet> = db.first_model(&pet.id).await.unwrap();
+        let found: Option<Pet> = db.first(&pet.id).await.unwrap();
         assert_eq!(found.unwrap().name, "Rex");
 
-        // find all
-        let mut pets: Vec<Pet> = db.find_models().await.unwrap();
+        // all
+        let mut pets: Vec<Pet> = db.all().await.unwrap();
         assert_eq!(pets.len(), 1);
 
         // update — hooks refresh updated_at
-        db.update(&mut pets[0], &[("age", SqlValue::I32(4))])
-            .await
-            .unwrap();
+        db.update(&mut pets[0], &[("age", 4)]).await.unwrap();
         assert!(pets[0].timestamps.updated_at.is_some());
-        let updated: Pet = db.first_model(&pet.id).await.unwrap().unwrap();
+        let updated: Pet = db.first(&pet.id).await.unwrap().unwrap();
         assert_eq!(updated.age, 4);
 
         // delete
         db.delete(&mut pet).await.unwrap();
-        let gone: Option<Pet> = db.first_model(&pet.id).await.unwrap();
+        let gone: Option<Pet> = db.first(&pet.id).await.unwrap();
         assert!(gone.is_none());
     }
 }

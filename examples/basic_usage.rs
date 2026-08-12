@@ -235,44 +235,43 @@ async fn demonstrate_connection_pool() -> std::result::Result<(), Box<dyn std::e
 }
 
 async fn demonstrate_sql_engine() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    println!("Pure Rust SQL engine (no rusqlite):");
+    println!("Pure Rust SQL engine (no rusqlite) + typed model:");
     
     let db = Database::sqlite(":memory:").await?;
     
-    // Create table
-    db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", &[]).await?;
-    println!("  ✅ Created users table");
+    // 依据模型自动建表（零 SqlValue）
+    db.auto_migrate::<Product>().await?;
+    println!("  ✅ Created products table from model schema");
     
-    // Insert data
-    db.execute("INSERT INTO users VALUES (1, 'Alice', 25)", &[]).await?;
-    db.execute("INSERT INTO users VALUES (2, 'Bob', 30)", &[]).await?;
-    db.execute("INSERT INTO users VALUES (3, 'Charlie', 35)", &[]).await?;
-    println!("  ✅ Inserted 3 users");
+    // 通过模型 create 插入
+    let mut products = vec![
+        Product { id: 0, name: "Apple".to_string(), price: 5 },
+        Product { id: 0, name: "Banana".to_string(), price: 3 },
+        Product { id: 0, name: "Cherry".to_string(), price: 9 },
+    ];
+    for p in &mut products {
+        db.create(p).await?;
+    }
+    println!("  ✅ Inserted {} products", products.len());
     
-    // Query data
-    let result = db.query("SELECT * FROM users", &[]).await?;
-    println!("  ✅ Query returned {} rows", result.rows.len());
-    for row in &result.rows {
-        println!("    Row: {:?}", row);
+    // 查询并映射回类型
+    let all: Vec<Product> = db.all::<Product>().await?;
+    println!("  ✅ Query returned {} rows", all.len());
+    for p in &all {
+        println!("    - {} price={}", p.name, p.price);
     }
     
-    // Update data
-    let affected = db.execute("UPDATE users SET age = 26 WHERE id = 1", &[]).await?;
+    // 更新（返回影响行数）
+    let affected = db.update(&mut products[0], &[("price", 6)]).await?;
     println!("  ✅ Updated {} row(s)", affected);
     
-    // Count
-    let _count = db.execute("SELECT COUNT(*) FROM users", &[]).await?;
-    println!("  ✅ Count query executed");
+    // 计数
+    let count = db.all::<Product>().await?.len();
+    println!("  ✅ Count = {}", count);
     
-    // Delete
-    let affected = db.execute("DELETE FROM users WHERE age > 32", &[]).await?;
+    // 删除（使用已回填主键的模型实例）
+    let affected = db.delete(&mut products[2]).await?;
     println!("  ✅ Deleted {} row(s)", affected);
-    
-    // Transaction
-    let mut transaction = db.begin_transaction().await?;
-    transaction.execute("INSERT INTO users VALUES (4, 'Dave', 40)", &[]).await?;
-    transaction.commit().await?;
-    println!("  ✅ Transaction committed");
     
     db.close().await?;
     println!("  ✅ Database closed");
@@ -307,7 +306,7 @@ fn demonstrate_query_builder() {
 
     // IN query
     let (sql, bindings) = QueryBuilder::new("users")
-        .where_in("id", vec![SqlValue::I32(1), SqlValue::I32(2), SqlValue::I32(3)])
+        .where_in("id", vec![1, 2, 3])
         .build();
     println!();
     println!("  IN query:");
@@ -322,6 +321,15 @@ fn demonstrate_query_builder() {
     println!("  BETWEEN query:");
     println!("    SQL: {}", sql);
     println!("    Bindings: {:?}", bindings);
+}
+
+/// Product 模型：使用 `#[derive(Model)]`，由宏自动生成 schema 与字段映射。
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "products")]
+pub struct Product {
+    pub id: i64,
+    pub name: String,
+    pub price: i64,
 }
 
 // User model with simplified UUID

@@ -10,9 +10,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use torm::{
-    AsyncStorageEngine, Database, Query, SqlValue, TableSchema,
+    AsyncStorageEngine, Database, Model, Query, TableSchema,
     StorageColumnDefinition as ColumnDefinition, StorageColumnType as ColumnType, WhereClause,
 };
+
+/// 商品模型：由 `#[derive(Model)]` 自动生成建表 schema 与字段映射。
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "products")]
+pub struct Product {
+    pub id: i64,
+    pub name: String,
+    pub price: i64,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,33 +47,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn database_concurrency() -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(Database::sqlite(":memory:").await?);
 
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            price INTEGER
-        )",
-        &[],
-    )
-    .await?;
+    // 依据 Product 模型自动建表。
+    db.auto_migrate::<Product>().await?;
 
-    // 预置数据
+    // 预置数据：通过模型 create，零 SqlValue。
     for i in 0..100 {
-        db.execute(
-            "INSERT INTO products (name, price) VALUES (?, ?)",
-            &[SqlValue::String(format!("product_{}", i)), SqlValue::I32(i)],
-        )
-        .await?;
+        let mut p = Product {
+            id: 0,
+            name: format!("product_{}", i),
+            price: i,
+        };
+        db.create(&mut p).await?;
     }
 
-    // 并发执行多个查询任务
+    // 并发执行多个查询任务（按页读取，映射回模型）。
     let mut handles = Vec::new();
     for offset in (0..100).step_by(25) {
         let db = Arc::clone(&db);
         handles.push(tokio::spawn(async move {
-            let sql = format!("SELECT * FROM products ORDER BY id LIMIT 25 OFFSET {}", offset);
-            let result = db.query(&sql, &[]).await?;
-            Ok::<usize, torm::db::database::DbError>(result.rows.len())
+            let products: Vec<Product> = Query::new("products")
+                .order_by_asc("id")
+                .limit(25)
+                .offset(offset)
+                .query(&db)
+                .models::<Product>()
+                .await?;
+            Ok::<usize, torm::db::database::DbError>(products.len())
         }));
     }
 
@@ -74,13 +82,13 @@ async fn database_concurrency() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("  4 concurrent queries fetched {} rows in total.", total);
 
-    // 使用 Query builder 并发查询
+    // 使用 Query builder 并发查询（值类型自动转换，无需手写 SqlValue::I32）
     let mut handles = Vec::new();
-    for min_price in [10, 20, 30, 40] {
+    for min_price in [10i64, 20, 30, 40] {
         let db = Arc::clone(&db);
         handles.push(tokio::spawn(async move {
             Query::new("products")
-                .where_gt("price", SqlValue::I32(min_price))
+                .where_gt("price", min_price)
                 .query(&db)
                 .count()
                 .await
@@ -133,7 +141,7 @@ async fn async_storage_concurrency() -> Result<(), Box<dyn std::error::Error>> {
     };
     engine.create_table(schema).await?;
 
-    // 并发插入 50 名玩家
+    // 并发插入 50 名玩家（底层引擎接受 SqlValue，使用 .into() 由原生值自动转换）
     let mut handles = Vec::new();
     for i in 0..50u32 {
         let engine = Arc::clone(&engine);
@@ -142,9 +150,9 @@ async fn async_storage_concurrency() -> Result<(), Box<dyn std::error::Error>> {
                 .insert(
                     "scores",
                     vec![
-                        SqlValue::I32(i as i32),
-                        SqlValue::String(format!("player_{}", i)),
-                        SqlValue::I32((i * 3 % 100) as i32),
+                        (i as i32).into(),
+                        format!("player_{}", i).into(),
+                        ((i * 3 % 100) as i32).into(),
                     ],
                 )
                 .await
@@ -162,15 +170,12 @@ async fn async_storage_concurrency() -> Result<(), Box<dyn std::error::Error>> {
             // 每个任务并发读一次总量，并对自己的行做更新
             let result = engine.select("scores", None, None, None, None).await?;
             let mut updates = HashMap::new();
-            updates.insert("score".to_string(), SqlValue::I32(100 + i as i32));
+            updates.insert("score".to_string(), (100 + i as i32).into());
             let affected = engine
                 .update(
                     "scores",
                     updates,
-                    Some(WhereClause::Eq(
-                        "id".to_string(),
-                        SqlValue::I32(i as i32),
-                    )),
+                    Some(WhereClause::Eq("id".to_string(), (i as i32).into())),
                 )
                 .await?;
             Ok::<(usize, u64), torm::db::storage::StorageError>((result.rows.len(), affected))

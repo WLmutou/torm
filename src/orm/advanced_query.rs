@@ -305,10 +305,10 @@ impl AdvancedQuery {
         self
     }
 
-    pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
+    pub fn where_in<V: Into<SqlValue>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.where_conditions.push(WhereCondition::In(
             column.to_string(),
-            values,
+            values.into_iter().map(Into::into).collect(),
         ));
         self
     }

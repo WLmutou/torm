@@ -1,5 +1,6 @@
 use crate::db::database::{Database, DbError};
 use crate::db::db_types::{DbType, QueryResult, SqlValue};
+use crate::orm::model::Model;
 use crate::utils::sql_safety::validate_qualified_identifier;
 use std::collections::HashMap;
 
@@ -185,20 +186,20 @@ impl QueryBuilder {
         self
     }
 
-    pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
+    pub fn where_in<V: Into<SqlValue>>(mut self, column: &str, values: Vec<V>) -> Self {
         let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
         self.conditions.push(format!("{} IN ({})", safe_column(column), placeholders.join(", ")));
         for value in values {
-            self.bindings.push(value);
+            self.bindings.push(value.into());
         }
         self
     }
 
-    pub fn where_not_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
+    pub fn where_not_in<V: Into<SqlValue>>(mut self, column: &str, values: Vec<V>) -> Self {
         let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
         self.conditions.push(format!("{} NOT IN ({})", safe_column(column), placeholders.join(", ")));
         for value in values {
-            self.bindings.push(value);
+            self.bindings.push(value.into());
         }
         self
     }
@@ -345,6 +346,35 @@ impl<'a> QueryExecutor<'a> {
     pub async fn select(&self) -> Result<QueryResult, DbError> {
         self.query.build().query(self.db).await
     }
+
+    /// Dapper 风格：执行 SELECT 查询并把每行自动映射回模型类型 `M`。
+    ///
+    /// `M` 需实现 `Model`（通常由 `#[derive(Model)]` 自动生成 `from_row`）。
+    ///
+    /// ```ignore
+    /// let users = Query::new("users")
+    ///     .where_gt("age", 18)
+    ///     .query(&db)
+    ///     .models::<User>()
+    ///     .await?;
+    /// ```
+    pub async fn models<M: Model>(&self) -> Result<Vec<M>, DbError> {
+        self.query
+            .build()
+            .query(self.db)
+            .await?
+            .rows
+            .iter()
+            .map(|row| {
+                M::from_row(row).ok_or_else(|| {
+                    DbError::ParseError(format!(
+                        "Failed to build {} from query row",
+                        M::table_name()
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 impl Query {
@@ -397,13 +427,19 @@ impl Query {
         self
     }
 
-    pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
-        self.where_conditions.push(WhereCondition::In(column.to_string(), values));
+    pub fn where_in<V: Into<SqlValue>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.where_conditions.push(WhereCondition::In(
+            column.to_string(),
+            values.into_iter().map(Into::into).collect(),
+        ));
         self
     }
 
-    pub fn where_not_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
-        self.where_conditions.push(WhereCondition::NotIn(column.to_string(), values));
+    pub fn where_not_in<V: Into<SqlValue>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.where_conditions.push(WhereCondition::NotIn(
+            column.to_string(),
+            values.into_iter().map(Into::into).collect(),
+        ));
         self
     }
 
@@ -773,6 +809,32 @@ mod tests {
         let (sql, bindings) = query.build().return_sql();
         assert_eq!(sql, "SELECT * FROM users WHERE status = ? AND age > ? ORDER BY created_at DESC LIMIT 20");
         assert_eq!(bindings.len(), 2);
+    }
+
+    #[test]
+    fn test_query_fluent_auto_value_conversion() {
+        // 无需手写 SqlValue::Type(...)，直接书写原生值即可自动转换。
+        let query = Query::new("users")
+            .where_eq("active", true)
+            .where_gte("age", 18i64)
+            .where_gt("score", 80.5f64)
+            .where_in("id", vec![1u32, 2u32, 3u32])
+            .where_like("name", "A%");
+
+        let (sql, bindings) = query.build().return_sql();
+        assert!(sql.contains("active = ?"));
+        assert!(sql.contains("age >= ?"));
+        assert!(sql.contains("score > ?"));
+        assert!(sql.contains("id IN (?, ?, ?)"));
+        assert!(sql.contains("name LIKE ?"));
+        assert_eq!(bindings.len(), 7);
+        assert!(matches!(bindings[0], SqlValue::Bool(true)));
+        assert!(matches!(bindings[1], SqlValue::I64(18)));
+        assert!(matches!(bindings[2], SqlValue::F64(v) if v == 80.5));
+        assert!(matches!(bindings[3], SqlValue::I64(1)));
+        assert!(matches!(bindings[4], SqlValue::I64(2)));
+        assert!(matches!(bindings[5], SqlValue::I64(3)));
+        assert!(matches!(bindings[6], SqlValue::String(_)));
     }
 
     #[test]

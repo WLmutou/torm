@@ -1,6 +1,15 @@
-use torm::{Database, DBDriver, Dsn, Model, Query, QueryBuilder, SqlValue};
+use torm::{Database, DBDriver, Dsn, Model, Query, QueryBuilder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+
+/// 文件持久化演示用的模型：`#[derive(Model)]` 自动生成 schema 与字段映射。
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct DemoUser {
+    pub id: i64,
+    pub name: String,
+    pub age: i32,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -152,25 +161,21 @@ async fn demonstrate_database_file_connection() -> Result<(), Box<dyn std::error
     database.ping().await?;
     println!("  ✅ Ping 成功");
 
-    // 执行 CRUD 操作以触发文件写入
-    database.execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)",
-        &[]
-    ).await?;
-    println!("  ✅ 创建表成功");
+    // 依据模型自动建表并执行 CRUD，触发文件写入（零 SqlValue）
+    database.auto_migrate::<DemoUser>().await?;
+    println!("  ✅ 创建表成功（依据模型 schema）");
 
-    database.execute(
-        "INSERT INTO users VALUES (1, 'Alice', 25)",
-        &[]
-    ).await?;
-    database.execute(
-        "INSERT INTO users VALUES (2, 'Bob', 30)",
-        &[]
-    ).await?;
+    let mut users = vec![
+        DemoUser { id: 0, name: "Alice".into(), age: 25 },
+        DemoUser { id: 0, name: "Bob".into(), age: 30 },
+    ];
+    for u in &mut users {
+        database.create(u).await?;
+    }
     println!("  ✅ 插入数据成功");
 
-    let result = database.query("SELECT * FROM users", &[]).await?;
-    println!("  ✅ 查询返回 {} 行", result.rows.len());
+    let all: Vec<DemoUser> = database.all::<DemoUser>().await?;
+    println!("  ✅ 查询返回 {} 行", all.len());
 
     database.close().await?;
     println!("  ✅ 数据库已关闭，数据已保存到 demo.db");
@@ -257,7 +262,7 @@ fn demonstrate_query_builder() {
 
     // IN 查询
     let (sql, bindings) = QueryBuilder::new("users")
-        .where_in("id", vec![SqlValue::I32(1), SqlValue::I32(2), SqlValue::I32(3)])
+        .where_in("id", vec![1, 2, 3])
         .build();
     println!();
     println!("IN 查询:");

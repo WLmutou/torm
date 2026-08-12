@@ -118,7 +118,7 @@ pub trait Model: Send + Sync {
     }
 
     /// Reconstruct a model from a query result row.
-    /// Used by `Database::first_model` / `Database::find_models`.
+    /// Used by `Database::first` / `Database::all`.
     fn from_row(row: &Row) -> Option<Self>
     where
         Self: Sized,

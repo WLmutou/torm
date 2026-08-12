@@ -599,6 +599,12 @@ fn gen_schema_impl(
         };
         if is_pk {
             col_def = quote! { #col_def .primary_key() };
+            // 整型主键默认开启自增（SQLite: AUTOINCREMENT / MySQL: AUTO_INCREMENT /
+            // PostgreSQL: SERIAL），便于 `create` 时以 `id = 0` 触发自动回填。
+            // 字符串 / UUID 主键不做自增。
+            if col_type == "Integer" || col_type == "BigInteger" {
+                col_def = quote! { #col_def .auto_increment() };
+            }
         }
         if is_unique {
             col_def = quote! { #col_def .unique() };

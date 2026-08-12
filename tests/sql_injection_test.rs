@@ -296,12 +296,12 @@ async fn model_crud_survives_injection_payload_in_value() {
     db.create(&mut account).await.unwrap();
 
     // 表仍然存在，且能按主键精确查出该记录
-    let found: Option<Account> = db.first_model(&account.id).await.unwrap();
+    let found: Option<Account> = db.first(&account.id).await.unwrap();
     assert!(found.is_some(), "injected value should be stored, not break the table");
     assert_eq!(found.unwrap().name, evil);
 
     // 完整记录数应为 1（表未被 DROP）
-    let all = db.find_models::<Account>().await.unwrap();
+    let all = db.all::<Account>().await.unwrap();
     assert_eq!(all.len(), 1, "table must not be dropped / truncated");
 }
 
@@ -320,16 +320,14 @@ async fn model_update_delete_survive_injection_payload_in_value() {
 
     // UPDATE 值包含注入 payload
     let evil = "malicious' OR '1'='1";
-    db.update(&mut account, &[("name", SqlValue::String(evil.to_string()))])
-        .await
-        .unwrap();
-    let updated: Account = db.first_model(&account.id).await.unwrap().unwrap();
+    db.update(&mut account, &[("name", evil)]).await.unwrap();
+    let updated: Account = db.first(&account.id).await.unwrap().unwrap();
     assert_eq!(updated.name, evil);
 
     // DELETE 安全执行
     let affected = db.delete(&mut account).await.unwrap();
     assert_eq!(affected, 1);
-    assert!(db.first_model::<Account>(&account.id).await.unwrap().is_none());
+    assert!(db.first::<Account>(&account.id).await.unwrap().is_none());
 }
 
 #[tokio::test]

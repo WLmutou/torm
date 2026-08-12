@@ -377,7 +377,7 @@ async fn derive_model_end_to_end_sqlite() {
     assert!(p.created_at.is_some(), "created_at set by before_create hook");
 
     // Find back via ORM (uses derive from_row()).
-    let found: Option<Person> = db.first_model(&p.id.to_string()).await.unwrap();
+    let found: Option<Person> = db.first(&p.id.to_string()).await.unwrap();
     let found = found.expect("person should be found");
     assert_eq!(found.name, "Alice");
     assert_eq!(found.age, Some(30));
@@ -388,11 +388,9 @@ async fn derive_model_end_to_end_sqlite() {
 
     // Update via ORM.
     let mut found = found;
-    db.update(&mut found, &[("age", SqlValue::I32(31))])
-        .await
-        .unwrap();
+    db.update(&mut found, &[("age", 31)]).await.unwrap();
     assert!(found.updated_at.is_some(), "updated_at set by before_update hook");
-    let reloaded: Option<Person> = db.first_model(&p.id.to_string()).await.unwrap();
+    let reloaded: Option<Person> = db.first(&p.id.to_string()).await.unwrap();
     assert_eq!(reloaded.unwrap().age, Some(31));
 
     // Delete via ORM.
@@ -407,7 +405,7 @@ async fn derive_model_end_to_end_sqlite() {
         tags: None,
     };
     db.delete(&mut to_delete).await.unwrap();
-    let gone: Option<Person> = db.first_model(&p.id.to_string()).await.unwrap();
+    let gone: Option<Person> = db.first(&p.id.to_string()).await.unwrap();
     assert!(gone.is_none());
 }
 
@@ -453,7 +451,7 @@ async fn sql_statement_execute_and_query() {
         .unwrap();
 
     // UPDATE 直接执行（Query::update(updates, db)），并通过 return_sql() 查看 SQL
-    let q = Query::new("users").where_eq("name", SqlValue::String("Alice".to_string()));
+    let q = Query::new("users").where_eq("name", "Alice");
     let affected = q
         .update(
             &{
@@ -477,7 +475,7 @@ async fn sql_statement_execute_and_query() {
 
     // SELECT 直接查询（Query::build().query()）
     let r = Query::new("users")
-        .where_eq("age", SqlValue::I32(31))
+        .where_eq("age", 31)
         .build()
         .query(&db)
         .await
@@ -505,7 +503,7 @@ async fn sql_statement_execute_and_query() {
     assert_eq!(total, 2);
 
     let r = Query::new("users")
-        .where_eq("age", SqlValue::I32(31))
+        .where_eq("age", 31)
         .query(&db)
         .select()
         .await
@@ -514,7 +512,7 @@ async fn sql_statement_execute_and_query() {
 
     // DELETE 直接执行（Query::delete(db)）
     let affected = Query::new("users")
-        .where_eq("name", SqlValue::String("Bob".to_string()))
+        .where_eq("name", "Bob")
         .delete(&db)
         .await
         .unwrap();
@@ -522,7 +520,7 @@ async fn sql_statement_execute_and_query() {
 
     // build() 后 return_sql() 查看 SELECT SQL
     let (sql, params) = Query::new("users")
-        .where_eq("id", SqlValue::I64(1))
+        .where_eq("id", 1i64)
         .build()
         .return_sql();
     assert_eq!(sql, "SELECT * FROM users WHERE id = ?");
@@ -661,4 +659,184 @@ async fn auto_migrate_creates_table_and_indexes() {
         dup.is_err(),
         "duplicate sku should be rejected by unique index"
     );
+}
+
+/// `#[derive(Model)]` 生成的 schema 应为整型主键标记自增；`auto_migrate` 建表后，
+/// 以 `id = 0` 的模型 `create` 会自动分配并回填主键。
+#[tokio::test]
+async fn auto_migrate_auto_increment_pk_refills_id() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.auto_migrate::<Product>().await.expect("auto migrate");
+
+    // 生成的自增列在 schema 中标记为 auto_increment。
+    let schema = Product::schema().unwrap();
+    let pk = schema
+        .columns
+        .iter()
+        .find(|c| c.primary_key)
+        .expect("pk column");
+    assert!(pk.auto_increment, "integer primary key should auto_increment");
+
+    // id = 0 插入：主键自动分配并回填。
+    let mut p1 = Product {
+        id: 0,
+        sku: "SKU-A1".to_string(),
+        category: "a".to_string(),
+        name: "p1".to_string(),
+        category2: "x".to_string(),
+        price: 1.0,
+    };
+    db.create(&mut p1).await.expect("insert p1");
+    assert!(p1.id > 0, "id should be auto-assigned, got {}", p1.id);
+
+    let mut p2 = Product {
+        id: 0,
+        sku: "SKU-A2".to_string(),
+        category: "b".to_string(),
+        name: "p2".to_string(),
+        category2: "y".to_string(),
+        price: 2.0,
+    };
+    db.create(&mut p2).await.expect("insert p2");
+    assert!(p2.id > p1.id, "ids should be strictly increasing");
+
+    // 回查验证 id 真实落库。
+    let found: Option<Product> = db.first(&p1.id.to_string()).await.unwrap();
+    let found = found.expect("row exists");
+    assert_eq!(found.sku, "SKU-A1");
+}
+
+/// `Database::last` 应返回按主键降序的第一条（即最后插入的那条）。
+#[tokio::test]
+async fn last_returns_the_most_recent_model_by_pk() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.auto_migrate::<Product>().await.expect("auto migrate");
+
+    let mut products: Vec<Product> = (0..5)
+        .map(|i| Product {
+            id: 0,
+            sku: format!("SKU-L{}", i),
+            category: "c".to_string(),
+            name: format!("p{}", i),
+            category2: "z".to_string(),
+            price: i as f64,
+        })
+        .collect();
+    for p in &mut products {
+        db.create(p).await.expect("insert");
+    }
+
+    let last: Option<Product> = db.last::<Product>().await.unwrap();
+    let last = last.expect("last row exists");
+    // 主键自增，最后一条应是 id 最大的那条。
+    assert_eq!(last.id, products.iter().map(|p| p.id).max().unwrap());
+    assert_eq!(last.name, "p4");
+
+    // 空表时 last 返回 None。
+    let empty = torm::Database::sqlite(":memory:").await.unwrap();
+    empty.auto_migrate::<Product>().await.expect("migrate");
+    assert!(empty.last::<Product>().await.unwrap().is_none());
+}
+
+// ------------------------------------------------------------------
+// Dapper 风格：Query 结果自动映射回模型类型 + UpdateBuilder 零 SqlValue 更新。
+// ------------------------------------------------------------------
+#[tokio::test]
+async fn query_executor_models_maps_rows_to_typed_models() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.execute(
+        "CREATE TABLE people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            age INTEGER,
+            email TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            deleted_at TEXT
+        )",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    for (name, age, email) in [
+        ("Alice", 25i64, "a@example.com"),
+        ("Bob", 17, "b@example.com"),
+        ("Carol", 30, "c@example.com"),
+    ] {
+        db.execute(
+            "INSERT INTO people (name, age, email) VALUES (?, ?, ?)",
+            &[
+                SqlValue::String(name.to_string()),
+                SqlValue::I64(age),
+                SqlValue::String(email.to_string()),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Dapper 风格：Query::new(...).query(&db).models::<Person>() 直接得到 Vec<Person>
+    let adults: Vec<Person> = Query::new("people")
+        .where_gte("age", 18)
+        .query(&db)
+        .models::<Person>()
+        .await
+        .unwrap();
+
+    let mut names: Vec<&str> = adults.iter().map(|p| p.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice", "Carol"]);
+    // 映射回类型后字段是真正的 i32 / String。
+    assert!(adults.iter().all(|p| p.age.unwrap() >= 18));
+}
+
+#[tokio::test]
+async fn update_with_plain_values_no_sqlvalue() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.execute(
+        "CREATE TABLE people (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            age INTEGER,
+            email TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            deleted_at TEXT
+        )",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let mut p = Person {
+        id: 0,
+        name: "Alice".to_string(),
+        age: Some(25),
+        email: "old@example.com".to_string(),
+        created_at: None,
+        updated_at: None,
+        deleted_at: None,
+        tags: None,
+    };
+    db.create(&mut p).await.unwrap();
+
+    // 更新：同类型列（&str）直接传原生值，零 SqlValue。
+    let affected = db
+        .update(
+            &mut p,
+            &[("name", "Alice A."), ("email", "new@example.com")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected, 1);
+    // 整数列更新同样零 SqlValue。
+    db.update(&mut p, &[("age", 26)]).await.unwrap();
+
+    let reloaded: Option<Person> = db.first(&p.id.to_string()).await.unwrap();
+    let reloaded = reloaded.expect("reloaded");
+    assert_eq!(reloaded.name, "Alice A.");
+    assert_eq!(reloaded.age, Some(26));
+    assert_eq!(reloaded.email, "new@example.com");
+    assert!(reloaded.updated_at.is_some(), "updated_at refreshed by hook");
 }

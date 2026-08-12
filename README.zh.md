@@ -13,9 +13,12 @@ TORM 是一个基于 Tokio 异步运行时的 Rust ORM（对象关系映射）�
 - ✅ **流畅的查询构建器** - 提供简洁直观的查询 API
 - ✅ **查询直接执行** - `insert` / `update` / `delete` 直接执行 SQL，通过 `return_sql()` 查看
 - ✅ **高级查询** - JOIN、GROUP BY、HAVING、聚合函数
+- ✅ **零 `SqlValue`** - `where_*` / `insert` / `update` 直接接受原生 Rust 值（`i32` / `f64` / `&str` / `bool` ...），通过 `Into<SqlValue>` 自动转换
+- ✅ **Dapper 风格类型化映射** - `QueryExecutor::models::<M>()` 把查询结果自动映射回类型化 `Vec<M>`
 - ✅ **模型 Trait** - 自动管理创建时间、更新时间等时间戳
 - ✅ **`#[derive(Model)]` 宏** - 从普通结构体自动生成 `Model` 实现，消除样板代码
-- ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create` / `first_model` / `find_models` / `update` / `delete`
+- ✅ **GORM 风格模型 CRUD** - `Database` 上的 `create` / `first` / `last` / `all` / `update` / `delete`
+- ✅ **自增主键** - `#[derive(Model)]` 自动标记整型主键自增，`id: 0` 自动分配并回填
 - ✅ **事务支持** - 支持事务的创建、提交和回滚
 - ✅ **连接池** - 支持 SQLite/MySQL/PostgreSQL 连接池
 - ✅ **防 SQL 注入** - 标识符校验/引用、字符串转义、危险模式检测（`utils::sql_safety`）
@@ -53,7 +56,9 @@ rand = "0.8"
 | 内存存储引擎 | 纯 Rust StorageEngine | ✅ 完整 |
 | MySQL | 自定义协议（原生实现） | ✅ 完整 |
 | PostgreSQL | 自定义协议（原生实现） | ✅ 完整 |
-| 类型安全 | 自定义 SqlValue | ✅ 完整 |
+| 类型安全 | SqlValue + 自动转换（`Into<SqlValue>`） | ✅ 完整 |
+| 类型化映射 | Dapper 风格：模型 CRUD 自动映射回类型化结构体 | ✅ 完整 |
+| 自增主键 | `#[derive(Model)]` 自动标记整型主键自增 | ✅ 完整 |
 | 事务支持 | 自定义实现 | ✅ 完整 |
 
 ## 🏗 模块结构
@@ -92,36 +97,44 @@ src/
 
 ### 基本使用
 
+推荐的方式是**先定义 `#[derive(Model)]` 结构体，再用高层 ORM API**。所有 insert / query / update / delete 的值都是原生 Rust 类型，无需 `SqlValue`。
+
 ```rust
-use torm::{Database, SqlValue};
+use torm::{Database, Model, Query};
+
+// 定义模型；宏自动生成 schema、字段映射与 from_row。
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,        // 0 表示触发自增，create 后自动回填
+    pub name: String,
+    pub age: i32,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. 创建 SQLite 数据库（标准 SQLite 文件格式）
     let db = Database::sqlite("mydb.db").await?;
 
-    // 2. 创建表
-    db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, age INTEGER)", &[]).await?;
+    // 2. 依据模型 schema 自动建表
+    db.auto_migrate::<User>().await?;
 
-    // 3. 插入数据（支持参数绑定）
-    db.execute(
-        "INSERT INTO users (name, age) VALUES (?, ?)",
-        &[SqlValue::String("Alice".to_string()), SqlValue::I32(25)],
-    ).await?;
+    // 3. 插入数据（id 自动分配并回填）
+    let mut alice = User { id: 0, name: "Alice".into(), age: 25 };
+    db.create(&mut alice).await?;
 
-    // 4. 查询数据
-    let result = db.query("SELECT * FROM users WHERE age > ?", &[SqlValue::I32(20)]).await?;
-    for row in &result.rows {
-        println!("{:?}", row.get("name"));
+    // 4. 条件查询并自动映射回 Vec<User>
+    let adults: Vec<User> = Query::new("users")
+        .where_gte("age", 18)
+        .query(&db)
+        .models::<User>()
+        .await?;
+    for u in &adults {
+        println!("{}: {}", u.name, u.age);
     }
 
-    // 5. 事务支持
-    let mut tx = db.begin_transaction().await?;
-    tx.execute("INSERT INTO users (name, age) VALUES (?, ?)", &[
-        SqlValue::String("Bob".to_string()),
-        SqlValue::I32(30),
-    ]).await?;
-    tx.commit().await?;
+    // 5. 更新（直接执行 SQL，返回影响行数）
+    let affected = db.update(&mut alice, &[("age", 26)]).await?;
 
     db.close().await?;
     Ok(())
@@ -135,8 +148,9 @@ $ sqlite3 mydb.db ".tables"
 users
 $ sqlite3 mydb.db "SELECT * FROM users;"
 1|Alice|25
-2|Bob|30
 ```
+
+> 如果你偏好**低层 raw SQL**（例如任意查询），可使用 `db.execute(sql, &[SqlValue...])`——参见下文「类型安全的 SQL 值」章节。
 
 ### 类型安全的 SQL 值
 
@@ -186,7 +200,7 @@ assert!(contains_injection_pattern("SELECT * FROM users WHERE id = ?").is_none()
 `Query` 提供流畅的构建 API，既可以**直接对数据库执行**，也可以使用 `return_sql()` **查看生成的 SQL**。
 
 ```rust
-use torm::{Database, Query, SqlValue};
+use torm::{Database, Query};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,11 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
 
     // ---- 写操作直接执行（INSERT / UPDATE / DELETE）----
-    let q = Query::new("users").where_eq("name", SqlValue::String("Alice".to_string()));
+    // 条件值直接写原生 Rust 类型（i32 / f64 / &str / bool / String ...），
+    // 无需再手动包装成 SqlValue::*。
+    let q = Query::new("users").where_eq("name", "Alice");
 
     let affected = q.update(
         &{ let mut m = std::collections::HashMap::new();
-           m.insert("age".to_string(), SqlValue::I32(31)); m },
+           m.insert("age".to_string(), 31); m },
         &db,
     ).await?;                                // 直接执行 UPDATE，返回受影响行数
 
@@ -211,11 +227,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // insert / delete 同样直接执行
     Query::new("users").insert(
-        &[("name", SqlValue::String("Bob".to_string())),
-          ("age", SqlValue::I32(25))],
+        &[("name", "Bob"),
+          ("age", 25)],
         &db,
     ).await?;
-    Query::new("users").where_eq("age", SqlValue::I32(25)).delete(&db).await?;
+    Query::new("users").where_eq("age", 25).delete(&db).await?;
 
     // ---- 读操作：通过 query(db) 得到执行器，或通过 build() 得到 SqlStatement ----
     let result = Query::new("users").query(&db).select().await?;  // 直接执行 SELECT
@@ -223,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rows.first().and_then(|r| r.get("COUNT(*)")).and_then(|v| v.as_i64()).unwrap_or(0);
 
     // build().query() 也可以，return_sql() 查看 SQL
-    let result = Query::new("users").where_gt("age", SqlValue::I32(20)).build()
+    let result = Query::new("users").where_gt("age", 20).build()
         .query(&db).await?;                  // 直接执行 SELECT
     let (sql, _) = Query::new("users").count().return_sql();
     // sql: "SELECT COUNT(*) FROM users"
@@ -232,10 +248,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+所有 `where_*` / `update` / `insert` 的值都接受**原生 Rust 值**（`i32` / `i64` / `f32` / `f64` / `&str` / `String` / `bool` / `Vec<u8>` / `chrono::DateTime<Utc>` 以及无符号整型），通过 `Into<SqlValue>` 自动转换——完全无需手写 `SqlValue::Type(...)`。
+
 `Query::query(db)` 返回一个 **`QueryExecutor`** 执行器，可链式选择读操作：
 
 - `QueryExecutor::count()` - 执行 `SELECT COUNT(*)`，返回含 `COUNT(*)` 列的结果集
 - `QueryExecutor::select()` - 执行 `SELECT *`
+- `QueryExecutor::models::<M>()` - 执行 `SELECT *` 并把每一行通过 `Model` trait 自动映射回类型化的 `Vec<M>`（需 `#[derive(Model)]`）
 
 `Query` 的 `build()` / `count()` / `build_update()` 等也会返回一个 `SqlStatement`，它同时提供执行与查看两种能力：
 
@@ -247,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 使用派生宏定义模型
 
-无需手写 `Model` 实现，只需给结构体加上 `#[derive(Model)]` 与 `#[model(table_name = "...")]` 属性。宏会自动生成 `columns()`、`from_row()`、主键访问器以及时间戳访问器。
+无需手写 `Model` 实现，只需给结构体加上 `#[derive(Model)]` 与 `#[model(table_name = "...")]` 属性。宏会自动生成 `columns()`、`from_row()`、主键访问器、时间戳访问器以及用于 `auto_migrate` 的 `schema()`——全程**零 `SqlValue`**。**整型主键会被自动标记为自增**（SQLite 生成 `AUTOINCREMENT`，MySQL 生成 `AUTO_INCREMENT`，PostgreSQL 生成 `SERIAL`），因此以 `id: 0` 插入模型时会自动分配主键并回写。
 
 ```rust
 use torm::{Model, Timestamps};
@@ -268,6 +287,56 @@ pub struct User {
 ```
 
 支持的字段类型：`String`、`bool`、`i8/i16/i32/i64`、`f32/f64`、`chrono::DateTime<Utc>`、`Uuid`、`Vec<u8>` 及其 `Option<...>` 包装。其他类型会自动跳过；使用 `#[model(skip)]` 显式排除某个字段，使用 `#[model(column = "...")]` 重命名数据库列名。
+
+### Dapper 风格的类型化 CRUD
+
+一旦派生出模型，**insert / query / update / delete 全程都不需要触碰 `SqlValue`**——值直接用原生 Rust 类型，结果返回类型化结构体（Dapper 风格的 `Query<T>`）。
+
+```rust
+use torm::{Database, Model, Query};
+
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "users")]
+pub struct User {
+    pub id: i64,        // 0 表示触发自增，create 后自动回填
+    pub name: String,
+    pub email: String,
+    pub age: i32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::sqlite("app.db").await?;
+    db.auto_migrate::<User>().await?;
+
+    // 1. 插入：id = 0 触发自增，随后自动回填。
+    let mut alice = User { id: 0, name: "Alice".into(), email: "a@e.com".into(), age: 25 };
+    db.create(&mut alice).await?;
+    println!("id = {}", alice.id); // 1
+
+    // 2. 查询：把每一行自动映射回 Vec<User>。
+    let adults: Vec<User> = Query::new("users")
+        .where_gte("age", 18)
+        .order_by_desc("age")
+        .query(&db)
+        .models::<User>()
+        .await?;
+
+    // 3. 更新：直接执行 SQL，返回受影响行数。
+    let affected = db.update(&mut alice, &[("age", 26)]).await?;
+
+    // 4. 按主键 / 全表读取，仍是类型化结果。
+    let one: Option<User> = db.first::<User>(&alice.id.to_string()).await?;
+    let last: Option<User> = db.last::<User>().await?;
+    let all: Vec<User> = db.all::<User>().await?;
+
+    // 5. 按模型删除。
+    let n = db.delete(&mut alice).await?;
+    Ok(())
+}
+```
+
+`Database::update(model, &[(column, value), ...])` 会**立即执行 UPDATE** 并返回受影响行数。各列值类型**相同**时直接用原生类型（`i32`/`&str` 等）；各列**类型不同**时把值统一为 `SqlValue`（如 `&[("age", SqlValue::I32(30)), ("email", SqlValue::String("x".into()))]`）。
 
 ### 连接池
 
@@ -346,22 +415,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 🏃 运行示例
 
+所有示例都遵循同一模式：**先定义 `#[derive(Model)]` 结构体，再用高层 ORM API 操作**——insert / query / update / delete 全程不触碰 `SqlValue`。
+
 ```bash
-# 基本使用示例
+# Dapper 风格类型化 CRUD（定义结构体后 create / first / last / all / update / delete）
+cargo run --example dapper_style
+
+# 异步并发：结构体 + auto_migrate，并发查询自动映射回 Vec<Product>
+cargo run --example async_concurrency
+
+# 优雅的 Query 构建器：直接写原生 Rust 值，无需 SqlValue::Type(...)
+cargo run --example ergonomic_query
+
+# 完整集成：连接、自动建表、类型化 CRUD、计数
+cargo run --example integration_example
+
+# 基础使用（UUID / 错误处理 / 缓存 / 连接池）+ 类型化模型
 cargo run --example basic_usage
 
-# 完整功能演示
+# 完整功能演示 + 基于派生模型的文件持久化
 cargo run --example complete_demo
 
-# 高级功能演示（关联、迁移、性能）
+# 高级功能（JOIN / GROUP BY / HAVING / 聚合）
 cargo run --example advanced_features
-
-# 数据库集成示例
-cargo run --example integration_example
 
 # 运行测试
 cargo test
 ```
+
+PostgreSQL 示例（`postgresql_example.rs`）额外演示了**低层 raw SQL + `SqlValue`** 的参数化绑定，仅在绕过 ORM 手写 SQL 时才需要。
 
 ## 🔄 数据库迁移工具
 
@@ -373,6 +455,8 @@ TORM 内置 4 个独立的命令行工具（位于 `src/bin/`），基于 TORM �
 | `postgresql2mysql` | PostgreSQL → MySQL |
 | `sqlite2postgres` | SQLite → PostgreSQL |
 | `postgres2sqlite` | PostgreSQL → SQLite |
+| `mysql2sqlite` | MySQL → SQLite |
+| `sqlite2mysql` | SQLite → MySQL|
 
 ### 构建
 
