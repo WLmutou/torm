@@ -489,7 +489,7 @@ The PostgreSQL example (`postgresql_example.rs`) additionally shows the **low-le
 
 ## 🔄 Database Migration Tools
 
-TORM ships with four standalone CLI tools (under `src/bin/`) that migrate schema and data **between** databases using the TORM native protocol drivers. Each tool discovers the source tables, translates the schema to the target dialect, and streams data in batches inside per-batch transactions.
+TORM ships with six standalone CLI tools (under `src/bin/`) that migrate schema and data **between** databases using the TORM native protocol drivers. Each tool discovers the source tables, translates the schema to the target dialect, and streams data in batches inside per-batch transactions.
 
 | Tool | Direction |
 |------|-----------|
