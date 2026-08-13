@@ -80,6 +80,20 @@ impl SqlStatement {
         };
         db.query(&sql, &self.params).await
     }
+
+    /// 执行 COUNT 查询并直接返回总数（`i64`）。
+    ///
+    /// 内部按索引取 COUNT(*) 结果集第一行第一列的值，不依赖具体列名，
+    /// 因此可兼容 SQLite（列名 `COUNT(*)`）、PostgreSQL（列名 `count`）等不同方言。
+    pub async fn count(&self, db: &Database) -> Result<i64, DbError> {
+        let result = self.query(db).await?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|r| r.get_by_index(0))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0))
+    }
 }
 
 /// 将 SQL 中的 `?` 占位符转换为 PostgreSQL 的 `$1/$2/...`。

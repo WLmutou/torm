@@ -361,7 +361,7 @@ impl Database {
 
         let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
         let values: Vec<SqlValue> = columns.into_iter().map(|(_, value)| value).collect();
-        let phs = placeholders(self.db_type(), values.len());
+        let phs = placeholders_for_values(self.db_type(), &values);
         let table_name = safe_identifier(M::table_name());
         let primary_key = safe_identifier(M::primary_key());
 
@@ -525,14 +525,19 @@ impl Database {
         }
 
         let mut sql = format!("UPDATE {} SET ", safe_identifier(M::table_name()));
-        let mut values = Vec::with_capacity(sets.len() + 1);
+        let mut values: Vec<SqlValue> = Vec::with_capacity(sets.len() + 1);
         for (i, (column, value)) in sets.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
             }
             sql.push_str(&safe_identifier(column));
             sql.push_str(" = ");
-            sql.push_str(&placeholder(self.db_type(), i + 1));
+            // PostgreSQL 下 Json 值需显式 cast 为 jsonb，否则无法写入 jsonb 列
+            if self.db_type() == DbType::PostgreSQL && matches!(value, SqlValue::Json(_)) {
+                sql.push_str(&format!("{}::jsonb", placeholder(self.db_type(), i + 1)));
+            } else {
+                sql.push_str(&placeholder(self.db_type(), i + 1));
+            }
             values.push(value.clone());
         }
         sql.push_str(&format!(
@@ -692,9 +697,21 @@ fn placeholder(db_type: DbType, index: usize) -> String {
     }
 }
 
-/// Parameter placeholders for a statement with `count` parameters.
-fn placeholders(db_type: DbType, count: usize) -> Vec<String> {
-    (1..=count).map(|i| placeholder(db_type, i)).collect()
+/// 生成与 `values` 一一对应的占位符。
+///
+/// PostgreSQL 下，未指定类型参数会被推断为 `text`，无法隐式写入 `jsonb` 列，
+/// 因此对 `SqlValue::Json` 的占位符追加 `::jsonb` 显式 cast；其余方言无需 cast。
+fn placeholders_for_values(db_type: DbType, values: &[SqlValue]) -> Vec<String> {
+    let mut out = Vec::with_capacity(values.len());
+    for (i, v) in values.iter().enumerate() {
+        let p = placeholder(db_type, i + 1);
+        if db_type == DbType::PostgreSQL && matches!(v, SqlValue::Json(_)) {
+            out.push(format!("{p}::jsonb"));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
