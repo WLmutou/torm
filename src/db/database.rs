@@ -517,6 +517,17 @@ impl Database {
             .iter()
             .map(|&(col, ref val)| (col, (*val).clone().into()))
             .collect();
+
+        // 自动同步 `#[model(json = "...")]` 标量字段到 `data` JSON 列。
+        // 由实现方根据 `updates` 的列名判断是否需要同步；若返回 `Some(json)`
+        // 则把 `data` 列写入 UPDATE。若调用方传入的 updates 已含 `data` 列
+        // （如全列更新 `&model.columns()`），先移除旧值再追加，避免重复赋值。
+        let updated_cols: Vec<&str> = updates.iter().map(|(col, _)| *col).collect();
+        if let Some(data) = model.sync_json_fields(&updated_cols) {
+            sets.retain(|(col, _)| *col != "data");
+            sets.push(("data", SqlValue::Json(data.to_string())));
+        }
+
         if let Some(ts) = model.updated_at() {
             sets.push(("updated_at", SqlValue::DateTime(ts)));
         }

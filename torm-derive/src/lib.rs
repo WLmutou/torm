@@ -84,6 +84,8 @@ struct FieldInfo {
     optional: bool,
     /// GORM-style field index declarations.
     indexes: Vec<FieldIndex>,
+    /// `#[model(json = "a.b.c")]`：把该字段同步到 `data` JSON 的路径。
+    json_path: Option<String>,
 }
 
 impl FieldInfo {
@@ -98,12 +100,15 @@ impl FieldInfo {
 struct ModelConfig {
     table_name: String,
     primary_key: String,
+    /// 承载完整 JSON 数据的字段名（`#[model(json_data = "field")]`，默认 `data`）。
+    json_data: String,
 }
 
 impl ModelConfig {
     fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut table_name: Option<String> = None;
         let mut primary_key: Option<String> = None;
+        let mut json_data: Option<String> = None;
 
         for attr in attrs {
             if !attr.path().is_ident("model") {
@@ -118,6 +123,9 @@ impl ModelConfig {
                     }
                     Meta::NameValue(nv) if nv.path.is_ident("primary_key") => {
                         primary_key = Some(expr_to_string(&nv.value)?);
+                    }
+                    Meta::NameValue(nv) if nv.path.is_ident("json_data") => {
+                        json_data = Some(expr_to_string(&nv.value)?);
                     }
                     _ => {}
                 }
@@ -134,6 +142,7 @@ impl ModelConfig {
         Ok(Self {
             table_name,
             primary_key: primary_key.unwrap_or_else(|| "id".to_string()),
+            json_data: json_data.unwrap_or_else(|| "data".to_string()),
         })
     }
 }
@@ -182,6 +191,7 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
         let mut skip = false;
         let mut column: Option<String> = None;
         let mut indexes: Vec<FieldIndex> = Vec::new();
+        let mut json_path: Option<String> = None;
         for attr in &field.attrs {
             if !attr.path().is_ident("model") {
                 continue;
@@ -222,6 +232,9 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
                             partners: Vec::new(),
                         });
                     }
+                    Meta::NameValue(nv) if nv.path.is_ident("json") => {
+                        json_path = Some(expr_to_string(&nv.value)?);
+                    }
                     _ => {}
                 }
             }
@@ -249,6 +262,7 @@ fn collect_fields(input: &DeriveInput, pk_name: &str) -> syn::Result<Vec<FieldIn
             ty,
             optional,
             indexes,
+            json_path,
         });
     }
 
@@ -306,6 +320,7 @@ fn type_tag(ty: &Type) -> Option<&'static str> {
         "f64" => "f64",
         "DateTime" => "datetime",
         "Uuid" => "uuid",
+        "Value" => "json",
         "Vec" => {
             // Only `Vec<u8>` maps to bytes; other Vec<T> are treated as
             // unsupported (association fields) and auto-skipped.
@@ -416,6 +431,13 @@ fn gen_columns_entries(fields: &[&FieldInfo]) -> Vec<proc_macro2::TokenStream> {
                         quote! { SqlValue::Bytes(self.#fname.clone()) }
                     }
                 }
+                "json" => {
+                    if f.optional {
+                        quote! { match &self.#fname { Some(v) => SqlValue::Json(v.to_string()), None => SqlValue::Null } }
+                    } else {
+                        quote! { SqlValue::Json(self.#fname.to_string()) }
+                    }
+                }
                 _ => return None,
             };
             Some(quote! { (#col, #expr) })
@@ -521,6 +543,13 @@ fn gen_from_row_expr(f: &FieldInfo) -> Option<proc_macro2::TokenStream> {
                 _ => return None,
             }
         }),
+        "json" => Some(quote! {
+            match row.get(#col)? {
+                SqlValue::Json(s) => serde_json::from_str(s).ok()?,
+                SqlValue::String(s) => serde_json::from_str(s).ok()?,
+                _ => return None,
+            }
+        }),
         _ => None,
     }?;
 
@@ -548,6 +577,7 @@ fn tag_to_column_type(tag: &str) -> Option<&'static str> {
         "datetime" => Some("DateTime"),
         "uuid" => Some("Uuid"),
         "bytes" => Some("Binary"),
+        "json" => Some("Json"),
         _ => None,
     }
 }
@@ -672,6 +702,81 @@ fn gen_schema_impl(
     }
 }
 
+/// 生成一个字段值到 `serde_json::Value` 的转换表达式。
+/// 返回 `(写入表达式, 是否可选)`。
+fn gen_json_value_expr(f: &FieldInfo) -> Option<proc_macro2::TokenStream> {
+    let fname = &f.ident;
+    let tag = type_tag(&f.ty)?;
+    if f.optional {
+        let inner = match tag {
+            "string" => quote! { serde_json::Value::String(v.clone()) },
+            "bool" => quote! { serde_json::Value::Bool(v) },
+            "i8" | "i16" | "i32" | "i64" => quote! { serde_json::Value::from(*v) },
+            "f32" | "f64" => quote! { serde_json::Value::from(*v) },
+            "datetime" => quote! { serde_json::Value::String(v.to_rfc3339()) },
+            _ => return None,
+        };
+        Some(quote! {
+            match &self.#fname {
+                Some(v) => Some(#inner),
+                None => None,
+            }
+        })
+    } else {
+        match tag {
+            "string" => Some(quote! { Some(serde_json::Value::String(self.#fname.clone())) }),
+            "bool" => Some(quote! { Some(serde_json::Value::Bool(self.#fname)) }),
+            "i8" | "i16" | "i32" | "i64" => Some(quote! { Some(serde_json::Value::from(self.#fname)) }),
+            "f32" | "f64" => Some(quote! { Some(serde_json::Value::from(self.#fname)) }),
+            "datetime" => Some(quote! { Some(serde_json::Value::String(self.#fname.to_rfc3339())) }),
+            _ => None,
+        }
+    }
+}
+
+/// 生成 `sync_json_fields` 实现：把本次 UPDATE 实际触及的、声明了
+/// `#[model(json = "path")]` 的字段写入 `json_data` 指向的 JSON 字段（默认 `data`）。
+fn gen_sync_json_fields(
+    json_data_ident: &syn::Ident,
+    json_fields: &[&FieldInfo],
+) -> proc_macro2::TokenStream {
+    // 每个字段：仅当其列在本次 UPDATE 中出现时才同步该字段，其余声明字段
+    // 保持原样，避免未更新的字段（如 None）意外覆盖/删除 data 镜像。
+    let writes: Vec<proc_macro2::TokenStream> = json_fields
+        .iter()
+        .filter_map(|f| {
+            let col = f.column_name();
+            let path = f.json_path.as_deref()?;
+            let value_expr = gen_json_value_expr(f)?;
+            Some(quote! {
+                if updated_columns.contains(&#col) {
+                    changed = true;
+                    match #value_expr {
+                        Some(v) => { torm::orm::model::json_set_path(obj, #path, v); }
+                        None => { torm::orm::model::json_remove_path(obj, #path); }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    quote! {
+        fn sync_json_fields(&mut self, updated_columns: &[&str]) -> Option<serde_json::Value> {
+            if self.#json_data_ident.is_none() {
+                self.#json_data_ident = Some(serde_json::Value::Object(serde_json::Map::new()));
+            }
+            let data_field = self.#json_data_ident.as_mut()?;
+            let obj = data_field.as_object_mut()?;
+            let mut changed = false;
+            #(#writes)*
+            if !changed {
+                return None;
+            }
+            Some(data_field.clone())
+        }
+    }
+}
+
 /// Build the complete `impl Model for ...` block.
 fn build_model_impl(
     input: &DeriveInput,
@@ -696,6 +801,22 @@ fn build_model_impl(
         .iter()
         .filter(|f| f.kind == FieldKind::Persist)
         .collect();
+
+    // json 自动同步：`json_data` 容器字段 + 声明了 `#[model(json = "...")]` 的字段。
+    let json_data_ident = fields
+        .iter()
+        .find(|f| f.ident == config.json_data)
+        .map(|f| f.ident.clone())
+        .unwrap_or_else(|| syn::Ident::new(&config.json_data, Span::call_site()));
+    let json_fields: Vec<&FieldInfo> = fields
+        .iter()
+        .filter(|f| f.json_path.is_some())
+        .collect();
+    let sync_json_impl = if json_fields.is_empty() {
+        quote! {}
+    } else {
+        gen_sync_json_fields(&json_data_ident, &json_fields)
+    };
 
     // --- id / set_id ---
     let (id_fn, set_id_fn) = match pk {
@@ -869,6 +990,8 @@ fn build_model_impl(
             #ts_impl
 
             #schema_impl
+
+            #sync_json_impl
 
             fn columns(&self) -> Vec<(&'static str, SqlValue)> {
                 vec![

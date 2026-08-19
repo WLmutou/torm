@@ -104,6 +104,20 @@ pub trait Model: Send + Sync {
         self.deleted_at().is_some()
     }
 
+    /// 将声明了 `#[model(json = "path")]` 的标量字段同步到 JSON 数据列
+    /// （即 `#[model(json_data = "field")]` 指向的字段，默认名为 `data`）。
+    ///
+    /// `updated_columns` 为本次 UPDATE 实际写入的列名。仅当其中包含已声明
+    /// json 映射的列时，实现才应合并这些字段到 `data` 并返回 `Some(json)`；
+    /// 否则返回 `None`，避免无关更新意外覆盖 `data`。
+    ///
+    /// `Database::update` 会在写入前自动调用本方法：若返回 `Some(json)`，
+    /// 则把 `data` 列一并写入 UPDATE，从而保证标量列与 `data` JSON 中的
+    /// 镜像字段保持一致。默认实现返回 `None`（不启用同步）。
+    fn sync_json_fields(&mut self, _updated_columns: &[&str]) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Persistable column/value pairs (excluding the primary key).
     /// Used by `Database::create` to build the INSERT statement.
     fn columns(&self) -> Vec<(&'static str, SqlValue)> {
@@ -126,6 +140,47 @@ pub trait Model: Send + Sync {
         let _ = row;
         None
     }
+}
+
+/// 按 `a.b.c` 点分路径向一个 JSON 对象写入值；中间对象不存在时自动创建。
+/// 返回是否发生写入。用于 `#[model(json = "path")]` 的自动同步。
+pub fn json_set_path(obj: &mut serde_json::Map<String, serde_json::Value>, path: &str, value: serde_json::Value) -> bool {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return false;
+    }
+    let mut cur = obj;
+    for (i, seg) in segments.iter().enumerate() {
+        if i + 1 == segments.len() {
+            cur.insert(seg.to_string(), value);
+            return true;
+        }
+        if !cur.contains_key(*seg) {
+            cur.insert(seg.to_string(), serde_json::Value::Object(Default::default()));
+        }
+        let Some(next) = cur.get_mut(*seg).and_then(|v| v.as_object_mut()) else {
+            return false;
+        };
+        cur = next;
+    }
+    true
+}
+
+/// 按 `a.b.c` 点分路径从 JSON 对象中移除值（含 None 场景）。返回是否发生移除。
+pub fn json_remove_path(obj: &mut serde_json::Map<String, serde_json::Value>, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return false;
+    }
+    let (last, parents) = segments.split_last().unwrap();
+    let mut cur = obj;
+    for seg in parents {
+        let Some(next) = cur.get_mut(*seg).and_then(|v| v.as_object_mut()) else {
+            return false;
+        };
+        cur = next;
+    }
+    cur.remove(*last).is_some()
 }
 
 /// Default timestamps model

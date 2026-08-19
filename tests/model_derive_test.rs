@@ -840,3 +840,135 @@ async fn update_with_plain_values_no_sqlvalue() {
     assert_eq!(reloaded.email, "new@example.com");
     assert!(reloaded.updated_at.is_some(), "updated_at refreshed by hook");
 }
+
+// ------------------------------------------------------------------
+// JSON 自动同步：`#[model(json_data = "...")]` + `#[model(json = "path")]`
+// 声明字段到 data JSON 的映射，`Database::update` 自动把 data 列一并写入。
+// ------------------------------------------------------------------
+#[derive(Debug, Clone, Model)]
+#[model(table_name = "alphas", json_data = "data")]
+struct AlphaRecord {
+    id: i64,
+    alpha_id: String,
+    color: Option<String>,
+    #[model(json = "color")]
+    color_sync: Option<String>,
+    #[model(json = "is.prodCorrelation")]
+    prod_correlation: Option<f64>,
+    #[model(json = "name")]
+    name: String,
+    data: Option<serde_json::Value>,
+    created_at: Option<chrono::DateTime<Utc>>,
+    updated_at: Option<chrono::DateTime<Utc>>,
+    deleted_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[tokio::test]
+async fn derive_json_sync_updates_data_column() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.execute(
+        "CREATE TABLE alphas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alpha_id TEXT,
+            color TEXT,
+            color_sync TEXT,
+            prod_correlation REAL,
+            name TEXT,
+            data TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            deleted_at TEXT
+        )",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let mut a = AlphaRecord {
+        id: 0,
+        alpha_id: "A1".to_string(),
+        color: None,
+        color_sync: None,
+        prod_correlation: None,
+        name: "initial".to_string(),
+        data: Some(serde_json::json!({
+            "id": "A1",
+            "is": { "sharpe": 1.5, "prodCorrelation": 0.3 },
+            "color": "BLUE",
+            "name": "initial"
+        })),
+        created_at: None,
+        updated_at: None,
+        deleted_at: None,
+    };
+    db.create(&mut a).await.unwrap();
+    assert!(a.id > 0);
+
+    // 更新 color 标量列 —— 期望 ORM 自动把新 color 写入 data JSON。
+    a.color_sync = Some("GREEN".to_string());
+    db.update(&mut a, &[("color_sync", "GREEN")]).await.unwrap();
+
+    let reloaded: AlphaRecord = db.first(&a.id.to_string()).await.unwrap().unwrap();
+    let data = reloaded.data.as_ref().expect("data should be persisted");
+    // 标量列更新，且 data 中的 color 镜像同步更新。
+    assert_eq!(data["color"], "GREEN");
+    // 其他 data 字段保留。
+    assert_eq!(data["is"]["sharpe"], 1.5);
+    assert_eq!(data["name"], "initial");
+
+    // 更新嵌套字段 prod_correlation -> data.is.prodCorrelation。
+    let mut reloaded = reloaded;
+    reloaded.prod_correlation = Some(0.9);
+    db.update(&mut reloaded, &[("prod_correlation", 0.9)])
+        .await
+        .unwrap();
+    let reloaded2: AlphaRecord = db.first(&a.id.to_string()).await.unwrap().unwrap();
+    assert_eq!(reloaded2.data.unwrap()["is"]["prodCorrelation"], 0.9);
+}
+
+#[tokio::test]
+async fn derive_json_sync_skips_unrelated_updates() {
+    let db = torm::Database::sqlite(":memory:").await.unwrap();
+    db.execute(
+        "CREATE TABLE alphas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alpha_id TEXT,
+            color TEXT,
+            color_sync TEXT,
+            prod_correlation REAL,
+            name TEXT,
+            data TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            deleted_at TEXT
+        )",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let mut a = AlphaRecord {
+        id: 0,
+        alpha_id: "A2".to_string(),
+        color: None,
+        color_sync: None,
+        prod_correlation: None,
+        name: "n1".to_string(),
+        data: Some(serde_json::json!({ "name": "n1", "color": "BLUE" })),
+        created_at: None,
+        updated_at: None,
+        deleted_at: None,
+    };
+    db.create(&mut a).await.unwrap();
+
+    // 仅更新未声明 json 映射的 alpha_id —— data 不应被改写。
+    let mut a = a;
+    a.alpha_id = "A2b".to_string();
+    db.update(&mut a, &[("alpha_id", "A2b")]).await.unwrap();
+
+    let reloaded: AlphaRecord = db.first(&a.id.to_string()).await.unwrap().unwrap();
+    let data = reloaded.data.unwrap();
+    assert_eq!(data["color"], "BLUE", "unrelated update must not touch data");
+    assert_eq!(data["name"], "n1");
+    assert_eq!(reloaded.alpha_id, "A2b");
+}
