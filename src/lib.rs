@@ -35,7 +35,7 @@ pub use torm_derive::Model;
 pub use orm::query::{Query, QueryBuilder, QueryExecutor, SqlStatement, WhereCondition, OrderDirection};
 pub use orm::advanced_query::{AdvancedQuery, JoinType, JoinClause, AggFunction, AggregationClause, OrderClause, Pagination};
 pub use orm::relations::{Relation, RelationType, BelongsTo, HasOne, HasMany, ManyToMany, PreloadBuilder};
-pub use orm::migration::{ColumnType, ColumnDefinition, IndexDefinition, TableDefinition, Migration, MigrationOperation, ForeignKeyDefinition, Migrator, MigrationStatus};
+pub use orm::migration::{ColumnType, ColumnDefinition, IndexDefinition, TableDefinition, Migration, MigrationOperation, ForeignKeyDefinition, RawSqlVariant, Migrator, MigrationStatus};
 
 // Core exports - 工具层
 pub use utils::simple_pool::{SimplePool, PoolStatus};

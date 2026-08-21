@@ -1,6 +1,7 @@
 use crate::db::db_types::{SqlValue, QueryResult, DbType};
 use crate::orm::model::Model;
 use crate::orm::migration::{ColumnDefinition, IndexDefinition, TableDefinition};
+use crate::orm::query::convert_placeholders;
 use crate::utils::sql_safety::validate_identifier;
 use std::sync::Arc;
 
@@ -295,6 +296,30 @@ impl Database {
     /// 执行 SQL 语句
     pub async fn execute(&self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
         self.conn.execute(sql, params).await
+    }
+
+    /// 执行查询（SELECT），自动按方言转换占位符。
+    ///
+    /// PostgreSQL 使用 `$n` 占位符，SQLite / MySQL 使用 `?`。
+    /// 本方法会为 PostgreSQL 自动将 SQL 中的 `?` 转换为 `$1/$2/...`，
+    /// 因此调用方统一书写 `?` 即可跨方言使用。
+    pub async fn query_sql(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, DbError> {
+        match self.db_type() {
+            DbType::PostgreSQL => self.conn.execute_query(&convert_placeholders(sql), params).await,
+            _ => self.conn.execute_query(sql, params).await,
+        }
+    }
+
+    /// 执行写语句（INSERT/UPDATE/DELETE/DDL），自动按方言转换占位符。
+    ///
+    /// PostgreSQL 使用 `$n` 占位符，SQLite / MySQL 使用 `?`。
+    /// 本方法会为 PostgreSQL 自动将 SQL 中的 `?` 转换为 `$1/$2/...`，
+    /// 因此调用方统一书写 `?` 即可跨方言使用。
+    pub async fn execute_sql(&self, sql: &str, params: &[SqlValue]) -> Result<u64, DbError> {
+        match self.db_type() {
+            DbType::PostgreSQL => self.conn.execute(&convert_placeholders(sql), params).await,
+            _ => self.conn.execute(sql, params).await,
+        }
     }
 
     /// 开始事务
