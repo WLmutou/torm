@@ -1,6 +1,6 @@
 use crate::db::error::{Result, TormError};
 use crate::db::database::Database;
-use crate::db::db_types::DbType;
+use crate::db::db_types::{DbType, SqlValue};
 use crate::utils::sql_safety::{validate_identifier, escape_string};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -278,6 +278,232 @@ impl RawSqlVariant {
     }
 }
 
+/// 一行种子 / 数据迁移记录
+///
+/// 用结构化的「列 → 值」表达，由 [`Migrator`] 生成参数化的 `INSERT`，
+/// 避免手写 SQL 与方言差异（如 SQLite 的 `ON CONFLICT`、MySQL 的 `INSERT IGNORE`）。
+#[derive(Debug, Clone)]
+pub struct RowDefinition {
+    /// 目标表名
+    pub table: String,
+    /// 列名与值的列表，顺序即插入顺序
+    pub columns: Vec<(String, SqlValue)>,
+    /// 幂等判重列：若该列组合已存在同名值则跳过插入。
+    /// 为空时表示不做判重（等价于无条件插入）。
+    pub conflict_columns: Vec<String>,
+    /// 某列的值来自子查询，例如按 `permissions.code` 反查 `id` 写入关联表。
+    /// 形式：`(目标列, 源表, 取哪一列, 条件列, 条件值)`。
+    pub lookups: Vec<LookupColumn>,
+}
+
+/// 由子查询派生的列值：`(SELECT {select} FROM {source_table} WHERE {match_column} = ?)`
+#[derive(Debug, Clone)]
+pub struct LookupColumn {
+    /// 写入目标表的列名
+    pub column: String,
+    /// 源表名
+    pub source_table: String,
+    /// 从源表取出的列（通常是 `id`）
+    pub select: String,
+    /// 源表的匹配列（如 `code`）
+    pub match_column: String,
+    /// 匹配列的值（如 `consultant:view`）
+    pub match_value: SqlValue,
+}
+
+/// WHERE 条件：`列 <op> 值`
+#[derive(Debug, Clone)]
+pub struct Condition {
+    pub column: String,
+    /// 比较运算符，如 `=`、`!=`、`IN`。默认 `=`。
+    pub op: String,
+    pub value: ConditionValue,
+}
+
+/// 条件右侧的取值形态
+#[derive(Debug, Clone)]
+pub enum ConditionValue {
+    /// 单个字面值
+    Single(SqlValue),
+    /// 多个字面值（配合 `IN` / `NOT IN`）
+    Many(Vec<SqlValue>),
+    /// 来自另一张表的子查询，如 `permission_id IN (SELECT id FROM permissions WHERE code IN (...))`
+    Subquery {
+        table: String,
+        select: String,
+        column: String,
+        values: Vec<SqlValue>,
+    },
+}
+
+impl Condition {
+    pub fn eq(column: &str, value: impl Into<SqlValue>) -> Self {
+        Self {
+            column: column.to_string(),
+            op: "=".to_string(),
+            value: ConditionValue::Single(value.into()),
+        }
+    }
+
+    pub fn ne(column: &str, value: impl Into<SqlValue>) -> Self {
+        Self {
+            column: column.to_string(),
+            op: "!=".to_string(),
+            value: ConditionValue::Single(value.into()),
+        }
+    }
+
+    /// `列 IN (...)`，用于批量条件更新/删除。
+    pub fn is_in(column: &str, values: Vec<SqlValue>) -> Self {
+        Self {
+            column: column.to_string(),
+            op: "IN".to_string(),
+            value: ConditionValue::Many(values),
+        }
+    }
+
+    /// `列 IN (SELECT select FROM table WHERE column IN (...))`，用于按业务键反查数值主键后批量处理。
+    pub fn is_in_subquery(
+        column: &str,
+        table: &str,
+        select: &str,
+        match_column: &str,
+        values: Vec<SqlValue>,
+    ) -> Self {
+        Self {
+            column: column.to_string(),
+            op: "IN".to_string(),
+            value: ConditionValue::Subquery {
+                table: table.to_string(),
+                select: select.to_string(),
+                column: match_column.to_string(),
+                values,
+            },
+        }
+    }
+}
+
+/// 一行数据的更新定义：按 `conditions` 精确定位，只改 `sets` 中的列。
+///
+/// 用于历史库的数据修正（如菜单路径改名），语义等价于
+/// `UPDATE {table} SET ... WHERE ...`，但不需要手写 SQL 与方言分支。
+#[derive(Debug, Clone)]
+pub struct UpdateDefinition {
+    pub table: String,
+    /// 要更新的列与新值
+    pub sets: Vec<(String, SqlValue)>,
+    /// WHERE 条件（AND 连接）；为空表示全表更新（谨慎使用）
+    pub conditions: Vec<Condition>,
+}
+
+impl UpdateDefinition {
+    pub fn new(table: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            sets: Vec::new(),
+            conditions: Vec::new(),
+        }
+    }
+
+    pub fn set(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
+        self.sets.push((column.to_string(), value.into()));
+        self
+    }
+
+    pub fn where_eq(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
+        self.conditions.push(Condition::eq(column, value));
+        self
+    }
+
+    pub fn where_ne(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
+        self.conditions.push(Condition::ne(column, value));
+        self
+    }
+
+    pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
+        self.conditions.push(Condition::is_in(column, values));
+        self
+    }
+
+    pub fn where_condition(mut self, cond: Condition) -> Self {
+        self.conditions.push(cond);
+        self
+    }
+}
+
+/// 删除定义：按 `conditions` 定位要删除的行。
+#[derive(Debug, Clone)]
+pub struct DeleteDefinition {
+    pub table: String,
+    pub conditions: Vec<Condition>,
+}
+
+impl DeleteDefinition {
+    pub fn new(table: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            conditions: Vec::new(),
+        }
+    }
+
+    pub fn where_eq(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
+        self.conditions.push(Condition::eq(column, value));
+        self
+    }
+
+    pub fn where_in(mut self, column: &str, values: Vec<SqlValue>) -> Self {
+        self.conditions.push(Condition::is_in(column, values));
+        self
+    }
+
+    pub fn where_condition(mut self, cond: Condition) -> Self {
+        self.conditions.push(cond);
+        self
+    }
+}
+
+impl RowDefinition {
+    pub fn new(table: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            columns: Vec::new(),
+            conflict_columns: Vec::new(),
+            lookups: Vec::new(),
+        }
+    }
+
+    /// 追加一列字面值。
+    pub fn value(mut self, column: &str, value: impl Into<SqlValue>) -> Self {
+        self.columns.push((column.to_string(), value.into()));
+        self
+    }
+
+    /// 追加一列由子查询得到的值（用于关联表按业务主键反查数值主键）。
+    pub fn value_from(
+        mut self,
+        column: &str,
+        source_table: &str,
+        select: &str,
+        match_column: &str,
+        match_value: impl Into<SqlValue>,
+    ) -> Self {
+        self.lookups.push(LookupColumn {
+            column: column.to_string(),
+            source_table: source_table.to_string(),
+            select: select.to_string(),
+            match_column: match_column.to_string(),
+            match_value: match_value.into(),
+        });
+        self
+    }
+
+    /// 指定幂等判重列（如 `code`、`path`）。
+    pub fn conflict_on(mut self, columns: &[&str]) -> Self {
+        self.conflict_columns = columns.iter().map(|c| c.to_string()).collect();
+        self
+    }
+}
+
 /// 迁移操作
 #[derive(Debug, Clone)]
 pub enum MigrationOperation {
@@ -292,7 +518,16 @@ pub enum MigrationOperation {
     DropIndex(String, String),
     AddForeignKey(String, ForeignKeyDefinition),
     DropForeignKey(String, String),
+    /// 插入一行数据（结构化，参数化执行，可幂等）。
+    InsertRow(RowDefinition),
+    /// 按条件更新数据（结构化，用于历史库数据修正）。
+    UpdateRows(UpdateDefinition),
+    /// 按条件删除数据（结构化，用于清理废弃记录）。
+    DeleteRows(DeleteDefinition),
     /// 直接执行一段原生 SQL，按方言选取对应语句。
+    ///
+    /// 仅用于无法用结构化操作表达的兼容性语句（如历史库的 `UPDATE` 修正）；
+    /// 新增数据请优先使用 [`MigrationOperation::InsertRow`]。
     RawSql(RawSqlVariant),
 }
 
@@ -351,6 +586,15 @@ impl Migration {
 
     pub fn add_operation(mut self, operation: MigrationOperation) -> Self {
         self.operations.push(operation);
+        self
+    }
+
+    /// 批量追加迁移操作（保持顺序）。
+    pub fn add_operations<I>(mut self, operations: I) -> Self
+    where
+        I: IntoIterator<Item = MigrationOperation>,
+    {
+        self.operations.extend(operations);
         self
     }
 
@@ -479,6 +723,22 @@ impl Migrator {
 
     pub async fn apply_migration(&mut self, migration: &Migration) -> Result<()> {
         for operation in &migration.operations {
+            // 数据操作需要参数化绑定与幂等判重，走独立分支
+            match operation {
+                MigrationOperation::InsertRow(row) => {
+                    self.apply_insert_row(row).await?;
+                    continue;
+                }
+                MigrationOperation::UpdateRows(upd) => {
+                    self.apply_update_rows(upd).await?;
+                    continue;
+                }
+                MigrationOperation::DeleteRows(del) => {
+                    self.apply_delete_rows(del).await?;
+                    continue;
+                }
+                _ => {}
+            }
             let sql = self.operation_to_sql(operation)?;
             self.execute_sql(&sql).await?;
         }
@@ -560,11 +820,9 @@ impl Migrator {
             MigrationOperation::CreateTable(table) => self.build_create_table_sql(table),
             MigrationOperation::DropTable(name) => {
                 let name = self.ident(name)?;
-                let if_exists = match self.database.db_type() {
-                    DbType::PostgreSQL => "IF EXISTS ",
-                    _ => "",
-                };
-                Ok(format!("DROP TABLE {if_exists}{name}"))
+                // 三种方言都支持 `DROP TABLE IF EXISTS`；删表本身应是幂等的，
+                // 否则「清理历史遗留表」这类迁移在表不存在时会直接失败。
+                Ok(format!("DROP TABLE IF EXISTS {name}"))
             }
             MigrationOperation::RenameTable(old_name, new_name) => {
                 let old = self.ident(old_name)?;
@@ -668,10 +926,309 @@ impl Migrator {
                     _ => Ok(format!("ALTER TABLE {table} DROP FOREIGN KEY {fk_name}")),
                 }
             }
+            MigrationOperation::InsertRow(row) => {
+                // INSERT 需要参数绑定，不能走单条 SQL 字符串路径；
+                // 这里给出可读 SQL 仅用于日志/调试，实际执行在 apply_insert_row。
+                let cols: Result<Vec<String>> =
+                    row.columns.iter().map(|(c, _)| self.ident(c)).collect();
+                let table = self.ident(&row.table)?;
+                Ok(format!(
+                    "INSERT INTO {table} ({}) VALUES ({} 个参数)",
+                    cols?.join(", "),
+                    row.columns.len()
+                ))
+            }
+            MigrationOperation::UpdateRows(upd) => {
+                let table = self.ident(&upd.table)?;
+                let sets: Result<Vec<String>> = upd
+                    .sets
+                    .iter()
+                    .map(|(c, _)| self.ident(c).map(|c| format!("{c} = ?")))
+                    .collect();
+                Ok(format!(
+                    "UPDATE {table} SET {} WHERE <{} 个条件>",
+                    sets?.join(", "),
+                    upd.conditions.len()
+                ))
+            }
+            MigrationOperation::DeleteRows(del) => {
+                let table = self.ident(&del.table)?;
+                Ok(format!(
+                    "DELETE FROM {table} WHERE <{} 个条件>",
+                    del.conditions.len()
+                ))
+            }
             MigrationOperation::RawSql(variant) => {
                 Ok(variant.for_db(self.database.db_type()).to_string())
             }
         }
+    }
+
+    /// 把条件列表编译成 `WHERE` 片段与参数。
+    fn build_where(&self, conditions: &[Condition]) -> Result<(String, Vec<SqlValue>)> {
+        let mut parts: Vec<String> = Vec::new();
+        let mut params: Vec<SqlValue> = Vec::new();
+        for c in conditions {
+            let ident = self.ident(&c.column)?;
+            match &c.value {
+                ConditionValue::Single(v) => {
+                    // 拒绝未加引号的运算符，避免把列名/值注入进来
+                    let op = c.op.trim().to_ascii_uppercase();
+                    if !matches!(op.as_str(), "=" | "!=" | "<>" | ">" | ">=" | "<" | "<=") {
+                        return Err(TormError::migration_error(format!(
+                            "不支持的比较运算符 `{}`（列 `{}`）",
+                            c.op, c.column
+                        )));
+                    }
+                    parts.push(format!("{ident} {op} ?"));
+                    params.push(v.clone());
+                }
+                ConditionValue::Many(vs) => {
+                    let op = c.op.trim().to_ascii_uppercase();
+                    if !matches!(op.as_str(), "IN" | "NOT IN") {
+                        return Err(TormError::migration_error(format!(
+                            "多值条件只支持 IN / NOT IN（列 `{}`）",
+                            c.column
+                        )));
+                    }
+                    if vs.is_empty() {
+                        // 空集合：`IN ()` 在部分数据库非法，改写成恒假/恒真
+                        parts.push(if op == "IN" { "1 = 0" } else { "1 = 1" }.to_string());
+                    } else {
+                        let ph = vec!["?"; vs.len()].join(", ");
+                        parts.push(format!("{ident} {op} ({ph})"));
+                        params.extend(vs.iter().cloned());
+                    }
+                }
+                ConditionValue::Subquery {
+                    table,
+                    select,
+                    column,
+                    values,
+                } => {
+                    let op = c.op.trim().to_ascii_uppercase();
+                    if !matches!(op.as_str(), "IN" | "NOT IN") {
+                        return Err(TormError::migration_error(format!(
+                            "子查询条件只支持 IN / NOT IN（列 `{}`）",
+                            c.column
+                        )));
+                    }
+                    if values.is_empty() {
+                        parts.push(if op == "IN" { "1 = 0" } else { "1 = 1" }.to_string());
+                    } else {
+                        let st = self.ident(table)?;
+                        let sel = self.ident(select)?;
+                        let col = self.ident(column)?;
+                        let ph = vec!["?"; values.len()].join(", ");
+                        parts.push(format!(
+                            "{ident} {op} (SELECT {sel} FROM {st} WHERE {col} IN ({ph}))"
+                        ));
+                        params.extend(values.iter().cloned());
+                    }
+                }
+            }
+        }
+        Ok((
+            if parts.is_empty() { "1 = 1".to_string() } else { parts.join(" AND ") },
+            params,
+        ))
+    }
+
+    /// 执行条件更新。
+    async fn apply_update_rows(&self, upd: &UpdateDefinition) -> Result<()> {
+        if upd.sets.is_empty() {
+            return Err(TormError::migration_error(format!(
+                "表 `{}` 的 UpdateRows 未提供任何待更新列",
+                upd.table
+            )));
+        }
+        let table = self.ident(&upd.table)?;
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<SqlValue> = Vec::new();
+        for (c, v) in &upd.sets {
+            sets.push(format!("{} = ?", self.ident(c)?));
+            params.push(v.clone());
+        }
+        let (where_sql, where_params) = self.build_where(&upd.conditions)?;
+        params.extend(where_params);
+
+        let sql = format!(
+            "UPDATE {table} SET {} WHERE {where_sql}",
+            sets.join(", ")
+        );
+        self.database
+            .execute_sql(&sql, &params)
+            .await
+            .map_err(|e| {
+                TormError::migration_error(format!("更新表 `{}` 数据失败: {e}", upd.table))
+            })?;
+        Ok(())
+    }
+
+    /// 执行条件删除。
+    async fn apply_delete_rows(&self, del: &DeleteDefinition) -> Result<()> {
+        if del.conditions.is_empty() {
+            return Err(TormError::migration_error(format!(
+                "表 `{}` 的 DeleteRows 未指定任何条件（禁止无条件删除）",
+                del.table
+            )));
+        }
+        let table = self.ident(&del.table)?;
+        let (where_sql, params) = self.build_where(&del.conditions)?;
+        let sql = format!("DELETE FROM {table} WHERE {where_sql}");
+        self.database
+            .execute_sql(&sql, &params)
+            .await
+            .map_err(|e| {
+                TormError::migration_error(format!("删除表 `{}` 数据失败: {e}", del.table))
+            })?;
+        Ok(())
+    }
+
+    /// 执行 `SELECT COUNT(*) AS c ...` 并取出计数。
+    ///
+    /// 不能用 [`Database::execute_sql`]：它返回受影响行数，对 `SELECT` 无意义。
+    async fn count_rows(&self, sql: &str, params: &[SqlValue]) -> Result<i64> {
+        // 必须用 `query_sql`：它会为 PostgreSQL 把 `?` 转成 `$1/$2/...`，
+        // 直接用 `query` 会把 `?` 原样发出，PG 解析到占位符处即报
+        // "syntax error at end of input"。
+        let res = self.database.query_sql(sql, params).await.map_err(|e| {
+            TormError::migration_error(format!("查询计数失败: {e}"))
+        })?;
+        let row = res
+            .rows
+            .first()
+            .ok_or_else(|| TormError::migration_error("计数查询未返回结果行".to_string()))?;
+        let v = row.get("c").or_else(|| row.values.first());
+        match v {
+            Some(SqlValue::I64(n)) => Ok(*n),
+            Some(SqlValue::I32(n)) => Ok(*n as i64),
+            Some(SqlValue::I16(n)) => Ok(*n as i64),
+            Some(SqlValue::String(s)) => Ok(s.parse::<i64>().unwrap_or(0)),
+            _ => Ok(0),
+        }
+    }
+
+    /// 仅用于测试：直接执行一条 `InsertRow`（验证幂等语义）。
+    #[doc(hidden)]
+    pub async fn apply_insert_row_for_test(&self, row: &RowDefinition) -> Result<()> {
+        self.apply_insert_row(row).await
+    }
+
+    /// 仅用于测试：直接执行一条 `UpdateRows`。
+    #[doc(hidden)]
+    pub async fn apply_update_for_test(&self, upd: &UpdateDefinition) -> Result<()> {
+        self.apply_update_rows(upd).await
+    }
+
+    /// 仅用于测试：直接执行一条 `DeleteRows`。
+    #[doc(hidden)]
+    pub async fn apply_delete_for_test(&self, del: &DeleteDefinition) -> Result<()> {
+        self.apply_delete_rows(del).await
+    }
+
+    /// 执行一行结构化数据插入（参数化 + 可幂等 + 支持子查询取值）。
+    async fn apply_insert_row(&self, row: &RowDefinition) -> Result<()> {
+        if row.columns.is_empty() && row.lookups.is_empty() {
+            return Err(TormError::migration_error(format!(
+                "表 `{}` 的 InsertRow 未提供任何列值",
+                row.table
+            )));
+        }
+        let table = self.ident(&row.table)?;
+
+        // 列名顺序：字面值在前，子查询列在后
+        let mut col_idents: Vec<String> = Vec::new();
+        let mut expr_parts: Vec<String> = Vec::new();
+        let mut values: Vec<SqlValue> = Vec::new();
+
+        for (c, v) in &row.columns {
+            col_idents.push(self.ident(c)?);
+            expr_parts.push("?".to_string());
+            values.push(v.clone());
+        }
+        for lk in &row.lookups {
+            col_idents.push(self.ident(&lk.column)?);
+            let src = self.ident(&lk.source_table)?;
+            let sel = self.ident(&lk.select)?;
+            let mcol = self.ident(&lk.match_column)?;
+            expr_parts.push(format!("(SELECT {sel} FROM {src} WHERE {mcol} = ?)"));
+            values.push(lk.match_value.clone());
+        }
+
+        // 幂等：若指定判重列，先按这些列做存在性检查。
+        // 判重列可以是字面值列，也可以是由子查询派生的列（如 permission_id）。
+        if !row.conflict_columns.is_empty() {
+            let mut conds: Vec<String> = Vec::new();
+            let mut check_params: Vec<SqlValue> = Vec::new();
+            for c in &row.conflict_columns {
+                let ident = self.ident(c)?;
+                if let Some((_, v)) = row.columns.iter().find(|(name, _)| name == c) {
+                    conds.push(format!("{ident} = ?"));
+                    check_params.push(v.clone());
+                } else if let Some(lk) = row.lookups.iter().find(|l| &l.column == c) {
+                    let src = self.ident(&lk.source_table)?;
+                    let sel = self.ident(&lk.select)?;
+                    let mcol = self.ident(&lk.match_column)?;
+                    conds.push(format!(
+                        "{ident} = (SELECT {sel} FROM {src} WHERE {mcol} = ?)"
+                    ));
+                    check_params.push(lk.match_value.clone());
+                } else {
+                    return Err(TormError::migration_error(format!(
+                        "判重列 `{c}` 既不是字面值列也不是子查询列（表 `{}`）",
+                        row.table
+                    )));
+                }
+            }
+            let cond_sql = conds.join(" AND ");
+            let check_sql = format!("SELECT COUNT(*) AS c FROM {table} WHERE {cond_sql}");
+
+            // 注意：必须用 `query` 读结果集；`execute_sql` 返回的是受影响行数，
+            // 对 SELECT 无意义（会恒为 0 或驱动相关的值），导致判重失效。
+            let existing = self.count_rows(&check_sql, &check_params).await.map_err(|e| {
+                TormError::migration_error(format!(
+                    "检查表 `{}` 是否存在重复记录失败: {e}",
+                    row.table
+                ))
+            })?;
+            if existing > 0 {
+                return Ok(());
+            }
+        }
+
+        // 子查询可能取不到值（源记录不存在）——先校验，避免写入 NULL 破坏非空约束
+        for lk in &row.lookups {
+            let src = self.ident(&lk.source_table)?;
+            let mcol = self.ident(&lk.match_column)?;
+            let probe = format!("SELECT COUNT(*) AS c FROM {src} WHERE {mcol} = ?");
+            let found = self
+                .count_rows(&probe, std::slice::from_ref(&lk.match_value))
+                .await
+                .map_err(|e| {
+                    TormError::migration_error(format!(
+                        "子查询取值 {}.{} 失败: {e}",
+                        lk.source_table, lk.select
+                    ))
+                })?;
+            if found == 0 {
+                // 源记录不存在时跳过整行插入（幂等语义，不报错）
+                return Ok(());
+            }
+        }
+
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            col_idents.join(", "),
+            expr_parts.join(", ")
+        );
+        self.database
+            .execute_sql(&sql, &values)
+            .await
+            .map_err(|e| {
+                TormError::migration_error(format!("向表 `{}` 插入种子数据失败: {e}", row.table))
+            })?;
+        Ok(())
     }
 
     /// 生成列类型字符串，应用 `ColumnDefinition::length`。
