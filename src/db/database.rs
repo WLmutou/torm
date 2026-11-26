@@ -372,6 +372,14 @@ impl Database {
             }
         }
         columns.extend(model.columns());
+        // PostgreSQL 的生成列只读，写入会报 `cannot insert into column "..."`；
+        // 由模型声明 `readonly_columns()` 后在此统一下掉（其他方言不受影响）。
+        if self.db_type() == DbType::PostgreSQL {
+            let readonly = M::readonly_columns();
+            if !readonly.is_empty() {
+                columns.retain(|(name, _)| !readonly.contains(name));
+            }
+        }
         if let Some(ts) = model.created_at() {
             columns.push(("created_at", SqlValue::DateTime(ts)));
         }
@@ -542,6 +550,15 @@ impl Database {
             .iter()
             .map(|&(col, ref val)| (col, (*val).clone().into()))
             .collect();
+
+        // PostgreSQL 的生成列只读（`column "..." can only be updated to DEFAULT`），
+        // 全列更新（如 `&model.columns()`）时需剔除。
+        if self.db_type() == DbType::PostgreSQL {
+            let readonly = M::readonly_columns();
+            if !readonly.is_empty() {
+                sets.retain(|(col, _)| !readonly.contains(col));
+            }
+        }
 
         // 自动同步 `#[model(json = "...")]` 标量字段到 `data` JSON 列。
         // 由实现方根据 `updates` 的列名判断是否需要同步；若返回 `Some(json)`

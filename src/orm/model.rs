@@ -124,6 +124,19 @@ pub trait Model: Send + Sync {
         Vec::new()
     }
 
+    /// 只读列（生成列 / 计算列），写入时应被跳过。
+    ///
+    /// 若模型把某个由数据库计算得出的列也放进了 [`Model::columns`]
+    /// （例如列在 SQLite 上是普通列、在 PostgreSQL 上是生成列），
+    /// 在这里声明列名即可：`Database::create` 与 `Database::update`
+    /// 会在**当前方言为 PostgreSQL** 时自动剔除这些列，
+    /// 避免 `cannot insert into column "..."` / `column "..." can only be updated to DEFAULT`。
+    ///
+    /// 其他方言仍会正常写入，因此不影响 SQLite / MySQL 行为。
+    fn readonly_columns() -> &'static [&'static str] {
+        &[]
+    }
+
     /// The table schema (columns, primary key and GORM-style indexes) for this
     /// model. Used by `Database::auto_migrate` to create the table and its
     /// indexes automatically. Implemented by `#[derive(Model)]`.

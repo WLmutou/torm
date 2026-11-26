@@ -90,6 +90,12 @@ pub struct ColumnDefinition {
     pub auto_increment: bool,
     pub unique: bool,
     pub comment: Option<String>,
+    /// 生成列表达式（`GENERATED ALWAYS AS (...) STORED`）。
+    ///
+    /// 值为 `Some` 表示该列由数据库计算得出、**不可写入**：
+    /// 迁移建列时追加生成子句，同时写入路径（`Database::create` / `update`）会自动跳过该列，
+    /// 避免 PG 报 `cannot insert into column "..."`。
+    pub generated: Option<String>,
 }
 
 impl ColumnDefinition {
@@ -104,7 +110,23 @@ impl ColumnDefinition {
             auto_increment: false,
             unique: false,
             comment: None,
+            generated: None,
         }
+    }
+
+    /// 声明为生成列：值由数据库按表达式计算，只读。
+    ///
+    /// - 建列 SQL 会追加 `GENERATED ALWAYS AS (expr) STORED`；
+    /// - 写入（INSERT/UPDATE）时该列被自动跳过；
+    /// - 仅 PostgreSQL 支持，其他方言由调用方决定是否退化（如仅 PG 走此定义）。
+    pub fn generated(mut self, expr: &str) -> Self {
+        self.generated = Some(expr.to_string());
+        self
+    }
+
+    /// 是否为生成列（只读，不应出现在写入语句中）。
+    pub fn is_generated(&self) -> bool {
+        self.generated.is_some()
     }
 
     /// 设置变长字符串长度（`VARCHAR(n)`）。
@@ -151,6 +173,10 @@ pub struct IndexDefinition {
     pub columns: Vec<String>,
     pub unique: bool,
     pub index_type: Option<String>,
+    /// 部分索引的过滤条件（如 `alpha_id IS NOT NULL`）：
+    /// 只对满足条件的行建索引/施加唯一约束，语序等价于
+    /// `CREATE [UNIQUE] INDEX ... ON t (cols) WHERE <predicate>`。
+    pub predicate: Option<String>,
 }
 
 impl IndexDefinition {
@@ -160,6 +186,7 @@ impl IndexDefinition {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             unique: false,
             index_type: None,
+            predicate: None,
         }
     }
 
@@ -170,6 +197,15 @@ impl IndexDefinition {
 
     pub fn index_type(mut self, index_type: &str) -> Self {
         self.index_type = Some(index_type.to_string());
+        self
+    }
+
+    /// 只对满足 `predicate` 的行建立（唯一）索引，即「部分索引」。
+    ///
+    /// 常见用法：`alpha_id IS NOT NULL` 让 NULL 行不参与唯一性判断
+    /// （SQL 标准里 `NULL != NULL`，但不希望由此产生重复键）。
+    pub fn where_clause(mut self, predicate: &str) -> Self {
+        self.predicate = Some(predicate.to_string());
         self
     }
 }
@@ -511,6 +547,12 @@ pub enum MigrationOperation {
     DropTable(String),
     RenameTable(String, String),
     AddColumn(String, ColumnDefinition),
+    /// 建列且允许列已存在（幂等）。
+    ///
+    /// 与 [`MigrationOperation::AddColumn`] 的区别：该迁移上次执行到中途失败
+    /// （版本未写入 `schema_migrations`）而列已经建好时，重跑不会报「列已存在」。
+    /// 供「建列后又需要补索引/回填」这类需要自愈的迁移使用。
+    AddColumnIfNotExists(String, ColumnDefinition),
     DropColumn(String, String),
     RenameColumn(String, String, String),
     ModifyColumn(String, ColumnDefinition),
@@ -725,6 +767,39 @@ impl Migrator {
         for operation in &migration.operations {
             // 数据操作需要参数化绑定与幂等判重，走独立分支
             match operation {
+                MigrationOperation::AddColumnIfNotExists(table, column) => {
+                    // 先探一次列是否存在：SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，
+                    // 统一用元数据探测保证三种方言行为一致。
+                    let columns = self
+                        .database
+                        .query_sql(&self.describe_columns_sql(table)?, &[])
+                        .await
+                        .map_err(|e| {
+                            TormError::migration_error(format!(
+                                "读取表 `{table}` 列信息失败: {e}"
+                            ))
+                        })?;
+                    let exists = columns.rows.iter().any(|row| {
+                        row.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|n| n.eq_ignore_ascii_case(&column.name))
+                            .unwrap_or(false)
+                    });
+                    if !exists {
+                        let table = self.ident(table)?;
+                        let sql = format!(
+                            "ALTER TABLE {table} ADD COLUMN {}",
+                            self.build_column_sql(column)?
+                        );
+                        self.execute_sql(&sql).await?;
+                    }
+                    continue;
+                }
+                MigrationOperation::AddIndex(table, index) if self.index_exists(table, &index.name).await? => {
+                    // 已存在：三种方言统一跳过，保证迁移可重复执行
+                    // （MySQL 的 CREATE INDEX 不支持 IF NOT EXISTS）
+                    continue;
+                }
                 MigrationOperation::InsertRow(row) => {
                     self.apply_insert_row(row).await?;
                     continue;
@@ -815,6 +890,53 @@ impl Migrator {
             .map_err(|e| TormError::migration_error(format!("非法标识符 `{name}`: {e}")))
     }
 
+    /// 生成「列出某表所有列名（别名 `name`）」的只读 SQL，用于建列前的存在性探测。
+    fn describe_columns_sql(&self, table: &str) -> Result<String> {
+        let table = self.ident(table)?;
+        Ok(match self.database.db_type() {
+            DbType::SQLite => format!("SELECT name FROM pragma_table_info('{table}')"),
+            DbType::MySQL => format!(
+                "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = '{table}'"
+            ),
+            DbType::PostgreSQL => format!(
+                "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}'"
+            ),
+        })
+    }
+
+    /// 生成「列出某表所有索引名（别名 `name`）」的只读 SQL，用于建索引前的存在性探测。
+    ///
+    /// MySQL 的 `CREATE INDEX` 不支持 `IF NOT EXISTS`，靠此探测保证重跑幂等。
+    fn describe_indexes_sql(&self, table: &str) -> Result<String> {
+        let table = self.ident(table)?;
+        Ok(match self.database.db_type() {
+            DbType::SQLite => format!("SELECT name FROM pragma_index_list('{table}')"),
+            DbType::MySQL => format!(
+                "SELECT DISTINCT index_name AS name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = '{table}'"
+            ),
+            DbType::PostgreSQL => format!(
+                "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND tablename = '{table}'"
+            ),
+        })
+    }
+
+    /// 索引是否已存在。
+    async fn index_exists(&self, table: &str, index_name: &str) -> Result<bool> {
+        let rows = self
+            .database
+            .query_sql(&self.describe_indexes_sql(table)?, &[])
+            .await
+            .map_err(|e| {
+                TormError::migration_error(format!("读取表 `{table}` 索引信息失败: {e}"))
+            })?;
+        Ok(rows.rows.iter().any(|row| {
+            row.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.eq_ignore_ascii_case(index_name))
+                .unwrap_or(false)
+        }))
+    }
+
     fn operation_to_sql(&self, operation: &MigrationOperation) -> Result<String> {
         match operation {
             MigrationOperation::CreateTable(table) => self.build_create_table_sql(table),
@@ -829,7 +951,8 @@ impl Migrator {
                 let new = self.ident(new_name)?;
                 Ok(format!("ALTER TABLE {old} RENAME TO {new}"))
             }
-            MigrationOperation::AddColumn(table_name, column) => {
+            MigrationOperation::AddColumn(table_name, column)
+            | MigrationOperation::AddColumnIfNotExists(table_name, column) => {
                 let table = self.ident(table_name)?;
                 Ok(format!(
                     "ALTER TABLE {table} ADD COLUMN {}",
@@ -875,8 +998,16 @@ impl Migrator {
                     DbType::SQLite | DbType::PostgreSQL => "IF NOT EXISTS ",
                     _ => "",
                 };
+                // 部分索引：MySQL 不支持 `WHERE` 子句，沿用过滤条件会直接报语法错，
+                // 故仅在 SQLite / PostgreSQL 上追加；MySQL 退化为普通（唯一）索引。
+                let where_clause = match (self.database.db_type(), &index.predicate) {
+                    (DbType::SQLite, Some(p)) | (DbType::PostgreSQL, Some(p)) => {
+                        format!(" WHERE {p}")
+                    }
+                    _ => String::new(),
+                };
                 Ok(format!(
-                    "CREATE {unique_str}INDEX {if_not_exists}{idx} ON {table} ({})",
+                    "CREATE {unique_str}INDEX {if_not_exists}{idx} ON {table} ({}){where_clause}",
                     cols?.join(", ")
                 ))
             }
@@ -1360,6 +1491,13 @@ impl Migrator {
             if column.unique {
                 sql.push_str(" UNIQUE");
             }
+
+            // 生成列：仅 PostgreSQL 支持（原因见 build_column_sql）
+            if let Some(expr) = &column.generated {
+                if db_type == DbType::PostgreSQL {
+                    sql.push_str(&format!(" GENERATED ALWAYS AS ({expr}) STORED"));
+                }
+            }
         }
 
         if let Some(comment) = &column.comment {
@@ -1395,6 +1533,14 @@ impl Migrator {
         }
         if column.unique {
             sql.push_str(" UNIQUE");
+        }
+        // 生成列：仅 PostgreSQL 支持 JSON 生成列。SQLite 的生成列表达式不能引用
+        // `json_extract` 之外的自定义函数、MySQL 8 则要求确定性表达式，
+        // 因此只有 PG 追加生成子句，其他方言得到普通列（由应用层写入维护）。
+        if let Some(expr) = &column.generated {
+            if db_type == DbType::PostgreSQL {
+                sql.push_str(&format!(" GENERATED ALWAYS AS ({expr}) STORED"));
+            }
         }
         if let Some(comment) = &column.comment {
             if db_type == DbType::MySQL {
@@ -1702,6 +1848,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.rows[0].get("c").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    /// 部分唯一索引：只约束满足谓词的行，NULL 行可任意多条；
+    /// 且同一索引重复创建（迁移重跑）不报错。
+    #[tokio::test]
+    async fn test_partial_unique_index_and_index_rerun() {
+        let database = Database::sqlite(":memory:").await.unwrap();
+        let mut migrator = Migrator::new(Arc::new(database));
+
+        let make = |version: i64| {
+            let mut m = Migration::new("partial_idx", version)
+                .add_operation(MigrationOperation::CreateTable(
+                    TableDefinition::new("items")
+                        .add_column(
+                            ColumnDefinition::new("id", ColumnType::Integer)
+                                .primary_key()
+                                .auto_increment(),
+                        )
+                        .add_column(ColumnDefinition::new("code", ColumnType::String).nullable(true)),
+                ))
+                .add_operation(MigrationOperation::AddIndex(
+                    "items".to_string(),
+                    IndexDefinition::new("uk_items_code", &["code"])
+                        .unique()
+                        .where_clause("code IS NOT NULL"),
+                ));
+            // 第二个版本重复建同一个索引，验证存在性探测让重跑不失败
+            if version == 2 {
+                m = m.add_operation(MigrationOperation::AddIndex(
+                    "items".to_string(),
+                    IndexDefinition::new("uk_items_code", &["code"])
+                        .unique()
+                        .where_clause("code IS NOT NULL"),
+                ));
+            }
+            m
+        };
+
+        migrator = migrator.add_migration(make(1)).add_migration(make(2));
+        migrator.run_migrations().await.unwrap();
+
+        let db = migrator.database();
+        // 多条 NULL 并存：不应触发唯一约束
+        db.query("INSERT INTO items (code) VALUES (NULL)", &[]).await.unwrap();
+        db.query("INSERT INTO items (code) VALUES (NULL)", &[]).await.unwrap();
+        // 非 NULL 重复：必须被唯一索引拦下
+        db.query("INSERT INTO items (code) VALUES ('a')", &[]).await.unwrap();
+        assert!(db.query("INSERT INTO items (code) VALUES ('a')", &[]).await.is_err());
     }
 
     #[tokio::test]
